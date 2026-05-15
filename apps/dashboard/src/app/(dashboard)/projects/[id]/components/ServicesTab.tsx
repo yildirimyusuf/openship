@@ -3,7 +3,8 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { usePlatform } from "@/context/PlatformContext";
-import { servicesApi, type Service, type ServiceContainer } from "@/lib/api/services";
+import { servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
+import { useToast } from "@/context/ToastContext";
 import { resolveServiceHostnameLabel } from "@repo/core";
 import { useRouter } from "next/navigation";
 import {
@@ -12,7 +13,6 @@ import {
   Globe,
   Container,
   AlertCircle,
-  Loader2,
   ChevronRight,
   ArrowLeft,
   Plus,
@@ -20,66 +20,51 @@ import {
   Zap,
 } from "lucide-react";
 import { ServiceDetailPanel } from "./services/ServiceDetailPanel";
+import { ServiceEditorModal } from "./services/ServiceEditorModal";
 
 /* ── Main Component ─────────────────────────────────────────────────── */
 
 export const ServicesTab = () => {
-  const { id, slug, projectData } = useProjectSettings();
+  const { id, slug, projectData, servicesData, refreshServices } = useProjectSettings();
   const { baseDomain } = usePlatform();
+  const { showToast } = useToast();
   const router = useRouter();
 
-  const [services, setServices] = useState<Service[]>([]);
   const [containers, setContainers] = useState<ServiceContainer[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [containersLoading, setContainersLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
 
+  const services = servicesData.services;
+  const loading = servicesData.isLoading || containersLoading;
   const projectSlugBase = projectData.slug || projectData.name || "project";
   const selectedId = slug?.[1] ?? null;
   const hasProjectId = Boolean(id && id !== "undefined");
 
   const fetchData = useCallback(async () => {
     if (!hasProjectId) {
-      setServices([]);
       setContainers([]);
-      setLoading(false);
+      setContainersLoading(false);
       return;
     }
 
     try {
-      setLoading(true);
+      setContainersLoading(true);
       setError(null);
-      const [svcRes, ctRes] = await Promise.all([
-        servicesApi.list(id),
-        servicesApi.containers(id),
-      ]);
-      if (svcRes.success) setServices(svcRes.services ?? []);
+      const [, ctRes] = await Promise.all([refreshServices(), servicesApi.containers(id)]);
       if (ctRes.success) setContainers(ctRes.containers ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load services");
     } finally {
-      setLoading(false);
+      setContainersLoading(false);
     }
-  }, [hasProjectId, id]);
+  }, [hasProjectId, id, refreshServices]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  const handleSync = async () => {
-    if (!hasProjectId) return;
-
-    setSyncing(true);
-    try {
-      const res = await servicesApi.sync(id, []);
-      if (res.success) setServices(res.services ?? []);
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  const containerFor = (serviceId: string) =>
-    containers.find((c) => c.serviceId === serviceId);
+  const containerFor = (serviceId: string) => containers.find((c) => c.serviceId === serviceId);
 
   const selectedService = services.find((s) => s.id === selectedId);
 
@@ -102,6 +87,21 @@ export const ServicesTab = () => {
     router.push(`/projects/${id}/services`);
   };
 
+  const handleCreateService = async (data: ServiceInput) => {
+    if (!hasProjectId) return;
+
+    const result = await servicesApi.create(id, data);
+    if (!result.success) {
+      throw new Error("Failed to create service");
+    }
+
+    await fetchData();
+    showToast("Service added", "success", data.name);
+    if (result.service?.id) {
+      router.push(`/projects/${id}/services/${result.service.id}`);
+    }
+  };
+
   /* ── Loading state ─────────────────────────────────────────────── */
   if (loading) {
     return (
@@ -122,13 +122,16 @@ export const ServicesTab = () => {
   }
 
   /* ── Error state ───────────────────────────────────────────────── */
-  if (error) {
+  if (error || servicesData.error) {
     return (
       <div className="bg-card rounded-2xl border border-border/50 p-8 text-center">
         <AlertCircle className="size-8 text-red-400 mx-auto mb-3" />
         <p className="text-sm font-medium text-foreground mb-1">Failed to load services</p>
-        <p className="text-xs text-muted-foreground mb-4">{error}</p>
-        <button onClick={fetchData} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors">
+        <p className="text-xs text-muted-foreground mb-4">{error || servicesData.error}</p>
+        <button
+          onClick={fetchData}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors"
+        >
           <RefreshCw className="size-3.5" />
           Retry
         </button>
@@ -139,40 +142,55 @@ export const ServicesTab = () => {
   /* ── Empty state ───────────────────────────────────────────────── */
   if (services.length === 0) {
     return (
-      <div className="bg-card rounded-2xl border border-border/50 p-10 text-center">
-        <div className="w-12 h-12 rounded-xl bg-muted/50 flex items-center justify-center mx-auto mb-4">
-          <Layers className="size-6 text-muted-foreground/50" />
-        </div>
-        <p className="text-sm font-semibold text-foreground/80 mb-1">No services connected</p>
-        <p className="text-xs text-muted-foreground/60 max-w-[300px] mx-auto mb-5 leading-relaxed">
-          Add databases, caches, or other services to extend your app.
-        </p>
-        <div className="flex flex-wrap justify-center gap-2 mb-5">
-          {[
-            { label: "PostgreSQL", icon: Database },
-            { label: "Redis", icon: Zap },
-            { label: "MySQL", icon: Database },
-          ].map((svc) => (
-            <span
-              key={svc.label}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/40 text-[12px] text-muted-foreground"
+      <>
+        <div className="bg-card rounded-2xl border border-border/50 p-10 text-center">
+          <div className="w-12 h-12 rounded-xl bg-muted/50 flex items-center justify-center mx-auto mb-4">
+            <Layers className="size-6 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm font-semibold text-foreground/80 mb-1">No services connected</p>
+          <p className="text-xs text-muted-foreground/60 max-w-[300px] mx-auto mb-5 leading-relaxed">
+            Add databases, caches, or other services to extend your app.
+          </p>
+          <div className="flex flex-wrap justify-center gap-2 mb-5">
+            {[
+              { label: "PostgreSQL", icon: Database },
+              { label: "Redis", icon: Zap },
+              { label: "MySQL", icon: Database },
+            ].map((svc) => (
+              <span
+                key={svc.label}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/40 text-[12px] text-muted-foreground"
+              >
+                <svc.icon className="size-3" />
+                {svc.label}
+              </span>
+            ))}
+          </div>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={fetchData}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors"
             >
-              <svc.icon className="size-3" />
-              {svc.label}
-            </span>
-          ))}
+              <RefreshCw className="size-3.5" />
+              Refresh
+            </button>
+            <button
+              onClick={() => setCreateOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="size-3.5" />
+              Add Service
+            </button>
+          </div>
         </div>
-        <div className="flex items-center justify-center gap-3">
-          <button onClick={handleSync} disabled={syncing} className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors disabled:opacity-50">
-            {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-            Sync from Compose
-          </button>
-          <button className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[13px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
-            <Plus className="size-3.5" />
-            Add Service
-          </button>
-        </div>
-      </div>
+        <ServiceEditorModal
+          open={createOpen}
+          mode="create"
+          projectName={projectSlugBase}
+          onClose={() => setCreateOpen(false)}
+          onSubmit={handleCreateService}
+        />
+      </>
     );
   }
 
@@ -195,17 +213,16 @@ export const ServicesTab = () => {
                   {selectedService.name}
                 </h3>
                 <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                  Service settings, routing, ports, logs, and container controls.
+                  Service settings, ports, logs, and container controls.
                 </p>
               </div>
             </div>
 
             <button
               onClick={fetchData}
-              disabled={syncing}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors disabled:opacity-50 shrink-0"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors shrink-0"
             >
-              {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              <RefreshCw className="size-3.5" />
               Refresh
             </button>
           </div>
@@ -216,8 +233,8 @@ export const ServicesTab = () => {
           container={containerFor(selectedService.id)}
           projectId={id}
           projectSlugBase={projectSlugBase}
-          onClose={closeService}
           onRefresh={fetchData}
+          onDeleted={closeService}
         />
       </div>
     );
@@ -242,11 +259,17 @@ export const ServicesTab = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={handleSync} disabled={syncing} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors disabled:opacity-50">
-              {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-              Sync
+            <button
+              onClick={fetchData}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.1] transition-colors"
+            >
+              <RefreshCw className="size-3.5" />
+              Refresh
             </button>
-            <button className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+            <button
+              onClick={() => setCreateOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
               <Plus className="size-3.5" />
               Add Service
             </button>
@@ -272,8 +295,12 @@ export const ServicesTab = () => {
 
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[14px] font-semibold text-foreground truncate">{svc.name}</span>
-                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.12em] ${svc.exposed ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted/60 text-muted-foreground/70"}`}>
+                  <span className="text-[14px] font-semibold text-foreground truncate">
+                    {svc.name}
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-[0.12em] ${svc.exposed ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted/60 text-muted-foreground/70"}`}
+                  >
                     <Globe className="size-2.5" />
                     {svc.exposed ? "Public" : "Internal"}
                   </span>
@@ -291,6 +318,14 @@ export const ServicesTab = () => {
           );
         })}
       </div>
+
+      <ServiceEditorModal
+        open={createOpen}
+        mode="create"
+        projectName={projectSlugBase}
+        onClose={() => setCreateOpen(false)}
+        onSubmit={handleCreateService}
+      />
     </div>
   );
 };
@@ -299,15 +334,37 @@ export const ServicesTab = () => {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { dot: string; badge: string; label: string }> = {
-    running: { dot: "bg-emerald-500", badge: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400", label: "Running" },
-    stopped: { dot: "bg-muted-foreground/30", badge: "bg-muted/60 text-muted-foreground/70", label: "Stopped" },
-    disabled: { dot: "bg-muted-foreground/20", badge: "bg-muted/40 text-muted-foreground/50", label: "Disabled" },
-    failed: { dot: "bg-red-500", badge: "bg-red-500/10 text-red-600 dark:text-red-400", label: "Failed" },
-    starting: { dot: "bg-amber-500", badge: "bg-amber-500/10 text-amber-600 dark:text-amber-400", label: "Starting" },
+    running: {
+      dot: "bg-emerald-500",
+      badge: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+      label: "Running",
+    },
+    stopped: {
+      dot: "bg-muted-foreground/30",
+      badge: "bg-muted/60 text-muted-foreground/70",
+      label: "Stopped",
+    },
+    disabled: {
+      dot: "bg-muted-foreground/20",
+      badge: "bg-muted/40 text-muted-foreground/50",
+      label: "Disabled",
+    },
+    failed: {
+      dot: "bg-red-500",
+      badge: "bg-red-500/10 text-red-600 dark:text-red-400",
+      label: "Failed",
+    },
+    starting: {
+      dot: "bg-amber-500",
+      badge: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+      label: "Starting",
+    },
   };
   const s = map[status] ?? map.stopped;
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.badge}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.badge}`}
+    >
       <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
       {s.label}
     </span>

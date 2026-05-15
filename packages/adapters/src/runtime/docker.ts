@@ -555,7 +555,7 @@ export class DockerRuntime implements RuntimeAdapter {
       throw new Error("Docker deploy requires an imageRef (built image tag)");
     }
 
-    const containerName = `openship-${config.slug || config.projectId}-${config.deploymentId}`;
+    const containerName = `openship-${config.runtimeName || config.projectId}-${config.deploymentId}`;
 
     // Environment variables
     const env = [

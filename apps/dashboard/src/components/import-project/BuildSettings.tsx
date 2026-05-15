@@ -1,11 +1,13 @@
 import React, { useState } from "react";
-import { Terminal, FolderOutput, Server, Package, Play, Hash, Settings2, ChevronDown, ChevronUp, Pencil, Hammer, BoxSelect, ShieldCheck } from "lucide-react";
+import { Terminal, FolderOutput, Package, Play, Hash, Settings2, ChevronDown, ChevronUp, Pencil, Hammer, BoxSelect, ShieldCheck } from "lucide-react";
 import { Toggle } from "@/components/project-settings/ServerSideSwitch";
 import { useOptionalDeployment } from "@/context/DeploymentContext";
+import { usePlatform } from "@/context/PlatformContext";
+import { getPublicEndpointHosts, getRecommendedSingleAppBuildImage, type PublicEndpoint } from "@/context/deployment/types";
 
 interface InputField {
   key: string;
-  label: string;
+  label: React.ReactNode;
   placeholder: string;
   description: string;
   type: 'text' | 'number';
@@ -13,6 +15,7 @@ interface InputField {
   max?: number;
   optional?: boolean;
   icon: React.ReactNode;
+  source?: 'options' | 'config';
 }
 
 interface BuildSettingsProps {
@@ -39,6 +42,7 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
     ? (deploymentContext ?? fallbackContext)
     : fallbackContext;
   const { config, updateOptions, updateConfig } = resolvedContext;
+  const { baseDomain } = usePlatform();
 
   const [isEditing] = useState(mode === 'simple');
 
@@ -52,6 +56,30 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
 
   const hasBuild = buildData?.hasBuild !== false;
   const hasServer = !!buildData?.hasServer;
+  const endpointFallbackHost = config?.projectName || config?.repo || 'project';
+  const primaryEndpointHost = getPublicEndpointHosts(
+    config?.publicEndpoints,
+    baseDomain,
+    endpointFallbackHost,
+  )[0] ?? "";
+  const additionalServerEndpoints: PublicEndpoint[] = hasServer
+    ? (config?.publicEndpoints ?? []).slice(1)
+    : [];
+  const staticEndpoints: PublicEndpoint[] = hasServer
+    ? []
+    : (config?.publicEndpoints ?? []);
+  const recommendedBuildImage = getRecommendedSingleAppBuildImage({
+    framework: config?.framework || "unknown",
+    packageManager: config?.packageManager || "npm",
+    buildImage: config?.buildImage || "",
+  });
+  const primaryPortLabel = primaryEndpointHost
+    ? (
+      <>
+        Port for <span className="text-foreground font-semibold">{primaryEndpointHost}</span>
+      </>
+    )
+    : 'Production Port';
 
   // ── Build-group fields (shown when Build is ON) ──────────────────
   const buildFields: InputField[] = [
@@ -84,17 +112,38 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
   ];
 
   // ── Advanced fields (hidden behind toggle) ───────────────────────
-  const advancedFields: InputField[] = needsBuild ? [
+  const advancedFields: InputField[] = [
     {
-      key: 'productionPaths',
-      label: 'Production Paths',
-      placeholder: 'dist, node_modules, package.json',
-      description: 'Only deploy these files/dirs after build — hides source code from runtime. Leave empty to run in-place.',
+      key: 'rootDirectory',
+      label: 'Source Folder',
+      placeholder: './',
+      description: 'Build from a subdirectory inside the repository or local project.',
       type: 'text',
       optional: true,
-      icon: <ShieldCheck className="size-4" />
+      icon: <FolderOutput className="size-4" />
     },
-  ] : [];
+    {
+      key: 'buildImage',
+      label: 'Build Image',
+      placeholder: recommendedBuildImage,
+      description: 'Builder container image for cloud or server builds. Override it when the detected base image is wrong.',
+      type: 'text',
+      optional: true,
+      icon: <BoxSelect className="size-4" />,
+      source: 'config',
+    },
+    ...(needsBuild ? [
+      {
+        key: 'productionPaths',
+        label: 'Production Paths',
+        placeholder: 'dist, node_modules, package.json',
+        description: 'Only deploy these files/dirs after build — hides source code from runtime. Leave empty to run in-place.',
+        type: 'text' as const,
+        optional: true,
+        icon: <ShieldCheck className="size-4" />
+      },
+    ] : []),
+  ];
 
   // ── Start-group fields (shown when Start is ON) ──────────────────
   const startFields: InputField[] = [
@@ -108,8 +157,8 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
     },
     {
       key: 'productionPort',
-      label: 'Production Port',
-      placeholder: '3000',
+      label: primaryPortLabel,
+      placeholder: 'Enter port',
       description: 'Production port for your application',
       type: 'number',
       min: 1,
@@ -120,17 +169,7 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
   ];
 
   // ── General fields (always visible) ──────────────────────────────
-  const generalFields: InputField[] = [
-    {
-      key: 'rootDirectory',
-      label: 'Root Directory',
-      placeholder: './',
-      description: 'Deploy a subdirectory of your repository',
-      type: 'text',
-      optional: true,
-      icon: <FolderOutput className="size-4" />
-    },
-  ];
+  const generalFields: InputField[] = [];
 
   const handleEdit = (field: string, currentValue: string) => {
     setEditingField(field);
@@ -149,16 +188,46 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
     setTempValues({ ...tempValues, [field]: originalValue });
   };
 
-  const handleChange = (field: string, value: string) => {
+  const handleChange = (field: InputField, value: string) => {
     if (mode === 'simple' && updateOptions) {
-      updateOptions({ [field]: value } as any);
+      if (field.key === 'productionPort' && config?.options?.hasServer && updateConfig) {
+        const [primaryEndpoint, ...remainingEndpoints] = config.publicEndpoints || [];
+        updateConfig({
+          productionPortTouched: true,
+          lastAutoDetectedEnvPort: null,
+          options: {
+            ...config.options,
+            productionPort: value,
+          },
+          publicEndpoints: primaryEndpoint
+            ? [{
+                ...primaryEndpoint,
+                port: value,
+              }, ...remainingEndpoints]
+            : config.publicEndpoints,
+        } as any);
+        return;
+      }
+
+      if (field.source === 'config' && updateConfig) {
+        updateConfig({ [field.key]: value } as any);
+        return;
+      }
+
+      updateOptions({ [field.key]: value } as any);
     } else {
-      setTempValues({ ...tempValues, [field]: value });
+      setTempValues({ ...tempValues, [field.key]: value });
     }
   };
 
   const renderInput = (field: InputField) => {
-    const value = mode === 'simple' ? (config?.options as any)?.[field.key] : buildData?.[field.key];
+    const value = mode === 'simple'
+      ? field.source === 'config'
+        ? (config as any)?.[field.key]
+        : (config?.options as any)?.[field.key]
+      : field.source === 'config'
+        ? (config as any)?.[field.key]
+        : buildData?.[field.key];
     const isCurrentlyEditing = mode === 'advanced' && editingField === field.key;
     const displayValue = isCurrentlyEditing ? tempValues[field.key] : value;
 
@@ -176,7 +245,7 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
             min={field.min}
             max={field.max}
             value={displayValue || ''}
-            onChange={(e) => handleChange(field.key, e.target.value)}
+            onChange={(e) => handleChange(field, e.target.value)}
             readOnly={!isEditing}
             placeholder={field.placeholder}
             className={`w-full px-3.5 py-2.5 border border-border/50 rounded-lg text-sm text-foreground transition-all ${isEditing
@@ -248,6 +317,109 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
   const visibleBuildFields = hasBuild ? buildFields : [];
   const visibleStartFields = hasServer ? startFields : [];
 
+  const resolveEndpointHost = (endpoint: PublicEndpoint, index: number) => {
+    if (endpoint.domainType === 'custom' && endpoint.customDomain) {
+      return endpoint.customDomain;
+    }
+
+    if (endpoint.domain) {
+      return `${endpoint.domain}.${baseDomain}`;
+    }
+
+    if (index === 0) {
+      return primaryEndpointHost || `${endpointFallbackHost}.${baseDomain}`;
+    }
+
+    return `domain ${index + 1}`;
+  };
+
+  const handleAdditionalEndpointPortChange = (endpointId: string, value: string) => {
+    if (!updateConfig || !config) return;
+
+    updateConfig({
+      publicEndpoints: (config.publicEndpoints || []).map((endpoint: PublicEndpoint) => (
+        endpoint.id === endpointId
+          ? {
+              ...endpoint,
+              port: value,
+            }
+          : endpoint
+      )),
+    } as any);
+  };
+
+  const handleEndpointTargetPathChange = (endpointId: string, value: string) => {
+    if (!updateConfig || !config) return;
+
+    updateConfig({
+      publicEndpoints: (config.publicEndpoints || []).map((endpoint: PublicEndpoint) => (
+        endpoint.id === endpointId
+          ? {
+              ...endpoint,
+              targetPath: value,
+            }
+          : endpoint
+      )),
+    } as any);
+  };
+
+  const renderEndpointTargetInputs = () => {
+    if (mode !== 'simple') {
+      return null;
+    }
+
+    if (hasServer) {
+      if (additionalServerEndpoints.length === 0) {
+        return null;
+      }
+
+      return additionalServerEndpoints.map((endpoint: PublicEndpoint, index: number) => {
+        const hostname = resolveEndpointHost(endpoint, index + 1);
+
+        return (
+          <div key={endpoint.id}>
+            <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+              Port for <span className="text-foreground font-semibold">{hostname}</span>
+              <span className="text-muted-foreground/50 ml-1">(Optional)</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={endpoint.port || ''}
+              onChange={(event) => handleAdditionalEndpointPortChange(endpoint.id, event.target.value)}
+              placeholder={config?.options?.productionPort || 'Enter port'}
+              className="w-full px-3.5 py-2.5 border border-border/50 rounded-lg text-sm text-foreground bg-muted/30 focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </div>
+        );
+      });
+    }
+
+    if (staticEndpoints.length === 0) {
+      return null;
+    }
+
+    return staticEndpoints.map((endpoint: PublicEndpoint, index: number) => {
+      const hostname = resolveEndpointHost(endpoint, index);
+
+      return (
+        <div key={endpoint.id}>
+          <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+            Path for <span className="text-foreground font-semibold">{hostname}</span>
+          </label>
+          <input
+            type="text"
+            value={endpoint.targetPath || '/'}
+            onChange={(event) => handleEndpointTargetPathChange(endpoint.id, event.target.value)}
+            placeholder="/"
+            className="w-full px-3.5 py-2.5 border border-border/50 rounded-lg text-sm text-foreground bg-muted/30 focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
+        </div>
+      );
+    });
+  };
+
   if (mode === 'simple') {
     return (
       <div className="bg-card rounded-2xl border border-border/50">
@@ -284,7 +456,9 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
                     <div>
                       <p className="text-sm font-medium text-foreground">Build</p>
                       <p className="text-[11px] text-muted-foreground leading-tight">
-                        {hasBuild ? 'Install & build commands' : 'Deploy source directly'}
+                        {hasBuild
+                          ? (config?.buildImage ? `Install & build in ${config.buildImage}` : 'Install & build commands')
+                          : 'Deploy source directly'}
                       </p>
                     </div>
                   </div>
@@ -327,13 +501,16 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
                     <div>
                       <p className="text-sm font-medium text-foreground">Start</p>
                       <p className="text-[11px] text-muted-foreground leading-tight">
-                        {hasServer ? `Server on port ${buildData?.productionPort || '3000'}` : 'Static from edge'}
+                        {hasServer
+                          ? (buildData?.productionPort ? `Server on port ${buildData.productionPort}` : 'Server port not set')
+                          : 'Static from edge'}
                       </p>
                     </div>
                   </div>
                   <Toggle checked={hasServer} onChange={(v: boolean) => updateOptions?.({ hasServer: v })} />
                 </div>
                 {visibleStartFields.map(renderInput)}
+                {renderEndpointTargetInputs()}
               </div>
             </div>
           </div>

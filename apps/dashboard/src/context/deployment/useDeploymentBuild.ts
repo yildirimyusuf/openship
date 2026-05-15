@@ -10,10 +10,46 @@ import { useBuildStream } from "@/hooks/useSSEConnection";
 import { deployApi, projectsApi } from "@/lib/api";
 import { ApiError } from "@/lib/api/client";
 import type { DeploymentConfig, DeploymentState, DeploymentStatus } from "./types";
-import { DEFAULT_CONFIG, INITIAL_STATE } from "./types";
+import {
+  DEFAULT_CONFIG,
+  INITIAL_STATE,
+  ensurePublicEndpoints,
+  publicEndpointsNeedCloud,
+  resolveBuildElapsedMs,
+  syncPublicEndpointState,
+  usesServiceDeployment,
+} from "./types";
 
 const ERROR_DEBOUNCE_MS = 1000;
 const MAX_RENDERED_BUILD_LOGS = 2000;
+
+function serializeProjectPublicEndpoint(
+  endpoint: DeploymentConfig["publicEndpoints"][number],
+  hasServer: boolean,
+) {
+  return {
+    ...(hasServer
+      ? (endpoint.port ? { port: Number(endpoint.port) } : {})
+      : { targetPath: endpoint.targetPath || "/" }),
+    domain: endpoint.domain || undefined,
+    customDomain: endpoint.customDomain || undefined,
+    domainType: endpoint.domainType,
+  };
+}
+
+function serializeBuildPublicEndpoint(
+  endpoint: DeploymentConfig["publicEndpoints"][number],
+  hasServer: boolean,
+) {
+  return {
+    ...(hasServer
+      ? (endpoint.port ? { port: endpoint.port } : {})
+      : { targetPath: endpoint.targetPath || "/" }),
+    domain: endpoint.domain,
+    customDomain: endpoint.customDomain,
+    domainType: endpoint.domainType,
+  };
+}
 
 /** Extract a human-readable message from API errors. */
 function extractErrorMessage(err: unknown, fallback: string): string {
@@ -101,12 +137,12 @@ export function useDeploymentBuild(
   const writeToTerminal = useCallback((data: Uint8Array) => {
     if (terminalRef.current && isTerminalReady.current) {
       terminalRef.current.write(data);
-    } else if (config.projectType === "services") {
+    } else if (usesServiceDeployment(config)) {
       return;
     } else {
       pendingLogsBuffer.current.push(data);
     }
-  }, [config.projectType]);
+  }, [config]);
 
   const flushPendingLogs = useCallback(() => {
     if (terminalRef.current && pendingLogsBuffer.current.length > 0) {
@@ -225,7 +261,7 @@ export function useDeploymentBuild(
         if (rawBytes) {
           writeToTerminal(rawBytes);
         }
-        if (config.projectType === "services" && rawText) {
+        if (usesServiceDeployment(config) && rawText) {
           const serviceName =
             typeof message.serviceName === "string" && message.serviceName.trim()
               ? message.serviceName
@@ -324,6 +360,7 @@ export function useDeploymentBuild(
 
     lastErrorRef.current = null;
 
+    const localBuildStartedAt = new Date().toISOString();
     setState((prev) => ({
       ...prev,
       isDeploying: true,
@@ -341,9 +378,15 @@ export function useDeploymentBuild(
       pendingPrompt: null,
       screenshots: [],
       serviceStatuses: [],
+      buildStartedAt: localBuildStartedAt,
+      buildDurationMs: null,
+      buildRetryCarryMs:
+        prev.deploymentFailed || prev.deploymentCanceled ? resolveBuildElapsedMs(prev) : 0,
     }));
 
     try {
+      const isServiceDeployment = usesServiceDeployment(config);
+
       // Step 1: Ensure project exists
       const projectData = await projectsApi.ensure({
         projectId: config.projectId || undefined,
@@ -361,13 +404,16 @@ export function useDeploymentBuild(
         installCommand: config.options.installCommand,
         startCommand: config.options.startCommand,
         rootDirectory: config.options.rootDirectory,
-        port: config.options.productionPort ? Number(config.options.productionPort) : undefined,
+        port: config.options.hasServer && config.options.productionPort
+          ? Number(config.options.productionPort)
+          : undefined,
+        publicEndpoints: !isServiceDeployment
+          ? config.publicEndpoints.map((endpoint) => (
+              serializeProjectPublicEndpoint(endpoint, config.options.hasServer)
+            ))
+          : undefined,
         hasServer: config.options.hasServer,
         hasBuild: config.options.hasBuild,
-        slug:
-          config.domainType === "free" && config.domain.trim()
-            ? config.domain.trim()
-            : undefined,
       });
 
       if (!projectData.success || !projectData.project_id) {
@@ -390,17 +436,26 @@ export function useDeploymentBuild(
         projectId: projectData.project_id,
         branch: config.branch || undefined,
         envVars: Object.keys(envVarsMap).length > 0 ? envVarsMap : undefined,
-        customDomain: config.domainType === "custom" && config.customDomain
-          ? config.customDomain
+        publicEndpoints: !isServiceDeployment
+          ? config.publicEndpoints.map((endpoint) => (
+              serializeBuildPublicEndpoint(endpoint, config.options.hasServer)
+            ))
           : undefined,
-        buildStrategy: config.projectType === "app" ? config.buildStrategy : "server",
+        buildStrategy:
+          config.projectType === "docker" || isServiceDeployment
+            ? "server"
+            : config.buildStrategy,
         deployTarget: config.deployTarget,
         serverId: config.serverId,
         runtimeMode:
-          config.projectType === "docker" || config.projectType === "services"
+          config.projectType === "docker" || isServiceDeployment
             ? "docker"
             : (overrides?.runtimeMode ?? config.runtimeMode),
-        services: config.projectType === "services"
+        serviceDeploymentMode:
+          config.projectType === "services"
+            ? config.serviceDeploymentMode
+            : undefined,
+        services: isServiceDeployment
           ? config.services.map((service) => ({
               name: service.name,
               image: service.image,
@@ -440,13 +495,13 @@ export function useDeploymentBuild(
       const canConnectCloud = canUseCloudConnection({ selfHosted, deployMode });
       const needsManagedProjectDomainHelp =
         canConnectCloud &&
-        config.projectType !== "services" &&
+        !usesServiceDeployment(config) &&
         config.deployTarget !== "cloud" &&
-        config.domainType === "free" &&
+        publicEndpointsNeedCloud(config.publicEndpoints) &&
         errorCode === "CLOUD_REQUIRED_MANAGED_PROJECT_DOMAIN";
       const needsManagedComposeDomainHelp =
         canConnectCloud &&
-        config.projectType === "services" &&
+        usesServiceDeployment(config) &&
         errorCode === "CLOUD_REQUIRED_MANAGED_COMPOSE_DOMAINS";
       const needsCloudTargetHelp = errorCode === "CLOUD_REQUIRED_TARGET";
 
@@ -498,6 +553,7 @@ export function useDeploymentBuild(
         setState((prev) => ({
           ...INITIAL_STATE,
           deploymentId,
+          buildRetryCarryMs: prev.deploymentId === deploymentId ? prev.buildRetryCarryMs : 0,
         }));
 
         const data = await deployApi.getBuildStatus(deploymentId);
@@ -511,35 +567,62 @@ export function useDeploymentBuild(
         // Restore config from session
         if (data.config) {
           const apiConfig = data.config;
-          // Strip domain suffix (e.g. "myapp.opsh.io" → "myapp", "myapp.example.com" → "myapp")
-          let cleanDomain = apiConfig.domain || "";
-          const dotIdx = cleanDomain.indexOf(".");
-          if (dotIdx > 0) {
-            cleanDomain = cleanDomain.slice(0, dotIdx);
-          }
+          const apiHasServer = apiConfig.hasServer !== undefined
+            ? apiConfig.hasServer
+            : config.options.hasServer;
+          const normalizedEndpoints = ensurePublicEndpoints(
+            apiConfig.publicEndpoints?.map((endpoint: {
+              port?: string;
+              targetPath?: string;
+              domain?: string;
+              customDomain?: string;
+              domainType?: "free" | "custom";
+            }) => {
+              let cleanDomain = endpoint.domain || "";
+              const dotIdx = cleanDomain.indexOf(".");
+              if (dotIdx > 0) {
+                cleanDomain = cleanDomain.slice(0, dotIdx);
+              }
 
-          setConfig((prev) => ({
+              return {
+                id: crypto.randomUUID(),
+                port: endpoint.port || "",
+                targetPath: endpoint.targetPath || "",
+                domain: cleanDomain,
+                customDomain: endpoint.customDomain || "",
+                domainType: endpoint.domainType || "free",
+              };
+            }),
+            apiHasServer ? undefined : { targetPath: "/" },
+          );
+
+          setConfig((prev) => syncPublicEndpointState({
             ...prev,
             projectId: data.project_id || prev.projectId,
-            domain: cleanDomain,
-            domainType: apiConfig.domainType || "free",
-            customDomain: apiConfig.customDomain || "",
+            publicEndpoints: normalizedEndpoints,
             repo: apiConfig.repo || prev.repo,
             owner: apiConfig.owner || prev.owner,
             projectName: apiConfig.projectName || prev.projectName,
             framework: apiConfig.framework || prev.framework,
+            packageManager: apiConfig.packageManager || prev.packageManager,
+            buildImage: apiConfig.buildImage || prev.buildImage,
             branch: apiConfig.branch || prev.branch,
             envVars: apiConfig.envVars || prev.envVars,
             projectType: data.projectType || prev.projectType,
+            serviceDeploymentMode:
+              apiConfig.serviceDeploymentMode ||
+              (data.projectType === "services" ? "services" : "single"),
             options: {
               buildCommand: apiConfig.buildCommand || prev.options.buildCommand,
               outputDirectory: apiConfig.outputDirectory || prev.options.outputDirectory,
               productionPaths: apiConfig.productionPaths || prev.options.productionPaths,
               installCommand: apiConfig.installCommand || prev.options.installCommand,
               startCommand: apiConfig.startCommand || prev.options.startCommand,
-              productionPort: apiConfig.productionPort || prev.options.productionPort,
+              productionPort: apiHasServer
+                ? (normalizedEndpoints[0]?.port || prev.options.productionPort)
+                : prev.options.productionPort,
               rootDirectory: apiConfig.rootDirectory || prev.options.rootDirectory,
-              hasServer: apiConfig.hasServer !== undefined ? apiConfig.hasServer : prev.options.hasServer,
+              hasServer: apiHasServer,
               hasBuild: apiConfig.hasBuild !== undefined ? apiConfig.hasBuild : prev.options.hasBuild,
             },
           }));
@@ -608,6 +691,7 @@ export function useDeploymentBuild(
           buildLogs,
           buildDurationMs: data.buildDurationMs ?? null,
           buildStartedAt: data.buildStartedAt ?? null,
+          buildRetryCarryMs: prev.buildRetryCarryMs,
           // Restore per-service statuses for compose projects
           serviceStatuses: data.projectType === "services" && data.services && data.serviceStatuses
             ? (data.services as any[]).map((svc: any) => {
@@ -713,6 +797,7 @@ export function useDeploymentBuild(
 
       try {
         lastErrorRef.current = null;
+        const localBuildStartedAt = new Date().toISOString();
 
         terminalRef.current?.clear();
         buildStream.disconnect();
@@ -736,8 +821,10 @@ export function useDeploymentBuild(
           buildLogs: [],
           screenshots: [],
           serviceStatuses: [],
-          buildStartedAt: null,
+          buildStartedAt: localBuildStartedAt,
           buildDurationMs: null,
+          buildRetryCarryMs:
+            prev.deploymentFailed || prev.deploymentCanceled ? resolveBuildElapsedMs(prev) : 0,
         }));
 
         const response = await deployApi.buildRedeploy(deploymentId);

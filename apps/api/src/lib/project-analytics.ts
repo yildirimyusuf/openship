@@ -12,9 +12,8 @@
  *   - analytics-scraper.ts  (periodic scrape via SSH)
  */
 
-import { repos } from "@repo/db";
+import { repos, type Project } from "@repo/db";
 import { OPENRESTY_MGMT_PORT } from "@repo/adapters";
-import { getRoutingBaseDomain } from "./routing-domains";
 import { tunnelRequest, tunnelStream } from "./ssh-tunnel";
 import { isOblienBackedDeployment } from "./platform-mode";
 
@@ -53,6 +52,30 @@ export type ProjectTrafficSource =
       deployTarget: "cloud";
     };
 
+async function resolveTrafficRuntime(project: Project) {
+  let deployTarget: string | null = null;
+  let serverId: string | null = null;
+
+  if (project.activeDeploymentId) {
+    const dep = await repos.deployment.findById(project.activeDeploymentId);
+    const meta = dep?.meta as { deployTarget?: string; serverId?: string } | null;
+    deployTarget = meta?.deployTarget ?? null;
+    if (meta?.serverId) serverId = meta.serverId;
+  }
+
+  return { deployTarget, serverId };
+}
+
+async function resolveProjectTrackedDomains(project: Project): Promise<string[]> {
+  const rows = await repos.domain.listByProject(project.id);
+  const hostnames = rows
+    .map((domain) => domain.hostname)
+    .filter((hostname): hostname is string => Boolean(hostname?.trim()))
+    .map(normalizeTrackedDomain);
+
+  return Array.from(new Set(hostnames));
+}
+
 /**
  * Resolve the tracked domain and server for a project.
  *
@@ -85,24 +108,14 @@ export async function resolveProjectTrafficSource(
   const project = await repos.project.findById(projectId);
   if (!project) return null;
 
-  // Domain: DB record first, then slug-based fallback
+  // Domain: tracked route rows only
   const primaryDomain = await repos.domain.getPrimaryByProject(projectId);
-  const baseDomain = getRoutingBaseDomain();
-  const hostname =
-    primaryDomain?.hostname ??
-    (project.slug && baseDomain ? `${project.slug}.${baseDomain}` : null);
+  const hostname = primaryDomain?.hostname ?? null;
   if (!hostname) return null;
 
   const domain = normalizeTrackedDomain(hostname);
 
-  let deployTarget: string | null = null;
-  let serverId: string | null = null;
-  if (project.activeDeploymentId) {
-    const dep = await repos.deployment.findById(project.activeDeploymentId);
-    const meta = dep?.meta as { deployTarget?: string; serverId?: string } | null;
-    deployTarget = meta?.deployTarget ?? null;
-    if (meta?.serverId) serverId = meta.serverId;
-  }
+  let { deployTarget, serverId } = await resolveTrafficRuntime(project);
 
   if (isOblienBackedDeployment(deployTarget)) {
     return {
@@ -125,6 +138,44 @@ export async function resolveProjectTrafficSource(
     serverId,
     deployTarget,
   };
+}
+
+/**
+ * Resolve all domains that should contribute to project-level overview analytics.
+ * Normal apps usually have one domain; compose/service apps can have one domain
+ * per exposed service, so the overview aggregates them.
+ */
+export async function resolveProjectTrafficSources(
+  projectId: string,
+): Promise<ProjectTrafficSource[]> {
+  const project = await repos.project.findById(projectId);
+  if (!project) return [];
+
+  const domains = await resolveProjectTrackedDomains(project);
+  if (domains.length === 0) return [];
+
+  let { deployTarget, serverId } = await resolveTrafficRuntime(project);
+
+  if (isOblienBackedDeployment(deployTarget)) {
+    return domains.map((domain) => ({
+      kind: "cloud" as const,
+      domain,
+      deployTarget: "cloud" as const,
+    }));
+  }
+
+  if (!serverId) {
+    const servers = await repos.server.list();
+    serverId = servers[0]?.id ?? null;
+  }
+  if (!serverId) return [];
+
+  return domains.map((domain) => ({
+    kind: "self-hosted" as const,
+    domain,
+    serverId,
+    deployTarget,
+  }));
 }
 
 // ─── OpenResty management API wrappers ───────────────────────────────────────

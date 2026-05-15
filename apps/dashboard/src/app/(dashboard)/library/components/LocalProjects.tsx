@@ -17,7 +17,7 @@ import {
   Zap,
   HardDrive,
 } from "lucide-react";
-import { projectsApi } from "@/lib/api/projects";
+import { projectsApi, type ScanProjectResponse } from "@/lib/api/projects";
 import { systemApi } from "@/lib/api/system";
 import { encodeLocalSlug } from "@/utils/repoSlug";
 
@@ -33,19 +33,6 @@ interface LocalProject {
   port: number | null;
   createdAt: string;
   updatedAt: string;
-}
-
-interface ScanResult {
-  success: boolean;
-  name: string;
-  path: string;
-  stack: string;
-  category: string;
-  packageManager: string;
-  installCommand: string;
-  buildCommand: string;
-  startCommand: string;
-  outputDirectory: string;
 }
 
 /* ── Component ────────────────────────────────────────────────────── */
@@ -306,7 +293,7 @@ function ImportForm({ onClose, onImported }: ImportFormProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [path, setPath] = useState("");
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanResult, setScanResult] = useState<ScanProjectResponse | null>(null);
   const [scanError, setScanError] = useState("");
   const [importing, setImporting] = useState(false);
   const [name, setName] = useState("");
@@ -381,6 +368,9 @@ function ImportForm({ onClose, onImported }: ImportFormProps) {
     setImporting(true);
 
     try {
+      const hasServer = !!scanResult.startCommand;
+      const hasBuild = !!scanResult.buildCommand;
+
       await projectsApi.importLocal({
         name: name.trim(),
         localPath: scanResult.path,
@@ -389,6 +379,13 @@ function ImportForm({ onClose, onImported }: ImportFormProps) {
         buildCommand: scanResult.buildCommand,
         installCommand: scanResult.installCommand,
         outputDirectory: scanResult.outputDirectory,
+        rootDirectory: scanResult.rootDirectory,
+        startCommand: scanResult.startCommand,
+        productionPaths: scanResult.productionPaths.join(", "),
+        buildImage: scanResult.buildImage,
+        port: hasServer ? scanResult.port : undefined,
+        hasServer,
+        hasBuild,
       });
       onImported();
     } catch (err: unknown) {

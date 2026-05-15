@@ -20,7 +20,11 @@
 import type { DeployConfig, LogCallback, RouteConfig, SslResult } from "../types";
 import type { BuildLogger } from "./build-pipeline";
 import { DeployError } from "@repo/core";
-import { registerResolvedRoutes, type RouteRegistrationOptions } from "./route-registration";
+import {
+  registerResolvedRoutes,
+  type RouteRegistrationOptions,
+  type RoutedDomainInput,
+} from "./route-registration";
 
 // ─── Prompt callback ────────────────────────────────────────────────────────
 
@@ -84,7 +88,7 @@ export interface DeployPipelineInput {
   /** Container ID of the currently-active deployment (to deactivate). */
   previousContainerId?: string;
   /** Verified domains that need routing. */
-  domains: Array<{ hostname: string; tls: boolean; provisionSsl?: boolean }>;
+  domains: RoutedDomainInput[];
   /** Routing provider — omit when routing is handled by the runtime (cloud). */
   routing?: DeployRouting;
   /** SSL provider — used when a domain needs cert provisioning/checks. */
@@ -162,8 +166,37 @@ export async function runDeployPipeline(
       : env.resolveTargetUrl
         ? await env.resolveTargetUrl(containerId, config.port).then((targetUrl) => targetUrl ? { targetUrl } : null)
         : null;
+    const routeTargetsByPort = env.resolveTargetUrl
+      ? new Map<number, Omit<RouteConfig, "domain" | "tls">>()
+      : undefined;
 
-    await registerResolvedRoutes(logger, routing, ssl, domains, routeTarget, routeOptions);
+    if (env.resolveTargetUrl && routeTargetsByPort) {
+      const uniquePorts = Array.from(
+        new Set(domains.map((domain) => domain.targetPort ?? config.port)),
+      );
+
+      for (const port of uniquePorts) {
+        if (port === config.port && routeTarget) {
+          routeTargetsByPort.set(port, routeTarget);
+          continue;
+        }
+
+        const targetUrl = await env.resolveTargetUrl(containerId, port);
+        if (targetUrl) {
+          routeTargetsByPort.set(port, { targetUrl });
+        }
+      }
+    }
+
+    await registerResolvedRoutes(
+      logger,
+      routing,
+      ssl,
+      domains,
+      routeTarget,
+      routeTargetsByPort,
+      routeOptions,
+    );
 
     logger.step("deploy", "completed", "Deployed successfully");
 

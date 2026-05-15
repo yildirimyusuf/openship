@@ -9,12 +9,17 @@ import { repos } from "@repo/db";
 import { NotFoundError, ForbiddenError } from "@repo/core";
 import type { LogEntry } from "@repo/adapters";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
-import { isComposeProject } from "./compose";
 import { collectDeploymentManifest, executeCleanup } from "../projects/project-cleanup.service";
 
-async function listComposeContainerIds(deploymentId: string): Promise<string[]> {
+async function listServiceContainerIds(deploymentId: string): Promise<string[]> {
   const rows = await repos.service.listByDeployment(deploymentId);
   return [...new Set(rows.map((row) => row.containerId).filter((id): id is string => !!id))];
+}
+
+async function listDeploymentContainerIds(dep: { id: string; containerId?: string | null }) {
+  const serviceContainerIds = await listServiceContainerIds(dep.id);
+  if (serviceContainerIds.length > 0) return serviceContainerIds;
+  return dep.containerId ? [dep.containerId] : [];
 }
 
 // ─── List deployments ────────────────────────────────────────────────────────
@@ -106,11 +111,7 @@ export async function rollbackDeployment(deploymentId: string, userId: string) {
 
   const project = await repos.project.findById(dep.projectId);
   if (!project) throw new NotFoundError("Project", dep.projectId);
-  const targetContainerIds = isComposeProject(project)
-    ? await listComposeContainerIds(dep.id)
-    : dep.containerId
-      ? [dep.containerId]
-      : [];
+  const targetContainerIds = await listDeploymentContainerIds(dep);
   if (targetContainerIds.length === 0) {
     throw new ForbiddenError("Rollback artifact is no longer retained for this deployment");
   }
@@ -119,11 +120,7 @@ export async function rollbackDeployment(deploymentId: string, userId: string) {
     const current = await repos.deployment.findById(project.activeDeploymentId);
     if (current) {
       const { runtime } = await resolveDeploymentRuntime(current);
-      const currentContainerIds = isComposeProject(project)
-        ? await listComposeContainerIds(current.id)
-        : current.containerId
-          ? [current.containerId]
-          : [];
+      const currentContainerIds = await listDeploymentContainerIds(current);
       for (const containerId of currentContainerIds) {
         await runtime.stop(containerId).catch(() => {});
       }
@@ -193,12 +190,7 @@ export async function restartDeployment(deploymentId: string, userId: string) {
   if (dep.status !== "ready") {
     throw new ForbiddenError("Can only restart a running deployment");
   }
-  const project = await repos.project.findById(dep.projectId);
-  const containerIds = project && isComposeProject(project)
-    ? await listComposeContainerIds(dep.id)
-    : dep.containerId
-      ? [dep.containerId]
-      : [];
+  const containerIds = await listDeploymentContainerIds(dep);
   if (containerIds.length === 0) {
     throw new ForbiddenError("Deployment has no container");
   }
@@ -244,5 +236,3 @@ export async function getBuildLogs(deploymentId: string, userId: string) {
   }
   return buildSession.logs as LogEntry[];
 }
-
-

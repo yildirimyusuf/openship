@@ -4,16 +4,16 @@ import React from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { DeploymentsContent } from "@/app/(dashboard)/deployments/components";
 import { projectsApi } from "@/lib/api";
-import { servicesApi, type Service } from "@/lib/api/services";
+import { type Service } from "@/lib/api/services";
 import { useModal } from "@/context/ModalContext";
 import { useToast } from "@/context/ToastContext";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Rocket } from "lucide-react";
-import { getProjectType } from "@repo/core";
 import { encodeLocalSlug, encodeRepoSlug } from "@/utils/repoSlug";
 
 export const Deployments = () => {
-  const { id, projectData, setActiveTab } = useProjectSettings();
+  const { id, projectData, setActiveTab, servicesData, refreshServices, hasMultipleServices } =
+    useProjectSettings();
   const { showToast } = useToast();
   const { showModal, hideModal } = useModal();
   const router = useRouter();
@@ -40,7 +40,11 @@ export const Deployments = () => {
       return;
     }
 
-    showToast("Project source is missing. Reconnect the repository or local path before redeploying.", "error", "Error");
+    showToast(
+      "Project source is missing. Reconnect the repository or local path before redeploying.",
+      "error",
+      "Error",
+    );
   }, [
     projectData?.gitOwner,
     projectData?.gitRepo,
@@ -55,12 +59,9 @@ export const Deployments = () => {
 
     setIsRedeploying(true);
     try {
-      const isServicesProject = getProjectType(projectData.framework as any) === "services";
-
-      if (isServicesProject) {
-        const serviceResponse = await servicesApi.list(projectData.id);
-        const services = serviceResponse.success ? (serviceResponse.services ?? []) : [];
-
+      if (hasMultipleServices) {
+        const services =
+          servicesData.services.length > 0 ? servicesData.services : await refreshServices();
         if (shouldWarnAboutUnreachableServices(services)) {
           const candidateServices = services.filter(isPotentiallyPublicService);
           let modalId = "";
@@ -72,16 +73,22 @@ export const Deployments = () => {
                     <AlertTriangle className="size-5" />
                   </div>
                   <div className="space-y-2">
-                    <h3 className="text-xl font-semibold text-foreground">No public domain is connected</h3>
+                    <h3 className="text-xl font-semibold text-foreground">
+                      No public domain is connected
+                    </h3>
                     <p className="text-sm leading-relaxed text-muted-foreground">
-                      This project has {candidateServices.length} service{candidateServices.length !== 1 ? "s" : ""} with exposed ports, but none are configured with a reachable domain.
-                      If you deploy now, the stack can run internally, but users will not be able to access it from a public URL.
+                      This project has {candidateServices.length} service
+                      {candidateServices.length !== 1 ? "s" : ""} with exposed ports, but none are
+                      configured with a reachable domain. If you deploy now, the stack can run
+                      internally, but users will not be able to access it from a public URL.
                     </p>
                   </div>
                 </div>
 
                 <div className="rounded-2xl border border-border/60 bg-muted/30 p-4 space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Suggested fix</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    Suggested fix
+                  </p>
                   <ul className="space-y-1.5 text-sm text-muted-foreground">
                     <li>Open the Services tab.</li>
                     <li>Pick the service that should be public.</li>

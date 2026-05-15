@@ -10,7 +10,7 @@
  */
 
 import { repos, type Deployment, type Domain, type Project, type Service } from "@repo/db";
-import { SYSTEM, getProjectType, resolveServiceHostnameLabel, type StackId } from "@repo/core";
+import { SYSTEM, resolveServiceHostnameLabel } from "@repo/core";
 import {
   BuildLogger,
   DEFAULT_RESOURCE_CONFIG,
@@ -64,17 +64,6 @@ export interface ComposeDeployResult {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Check if a project is a compose / multi-service project */
-export function isComposeProject(project: Project): boolean {
-  const framework = project.framework as StackId | undefined;
-  if (!framework) return false;
-  try {
-    return getProjectType(framework) === "services";
-  } catch {
-    return framework === "docker-compose";
-  }
-}
 
 /** Topological sort of services by dependsOn — respects dependency order. */
 function topoSort(services: Service[]): Service[] {
@@ -199,6 +188,10 @@ function createServiceDeployConfig(opts: {
   buildSessionId?: string;
 }): DeployConfig {
   const { project, dep, service, image, environment, resources, buildSessionId } = opts;
+  const publicPort = resolveServicePublicPort(service);
+  const publicSlug = resolveServicePublicSlug(project, service);
+  const customDomain = resolveServiceCustomDomain(service);
+
   return {
     deploymentId: dep.id,
     projectId: project.id,
@@ -211,8 +204,15 @@ function createServiceDeployConfig(opts: {
     envVars: environment,
     resources: resources ?? DEFAULT_RESOURCE_CONFIG,
     restartPolicy: toDeployRestartPolicy(service.restart ?? undefined),
-    slug: resolveServicePublicSlug(project, service) ?? `${project.slug}-${service.name}`,
-    customDomain: resolveServiceCustomDomain(service),
+    runtimeName: publicSlug ?? `${project.slug}-${service.name}`,
+    publicEndpoints: service.exposed && publicPort
+      ? [{
+          port: publicPort,
+          domain: service.domainType === "custom" ? undefined : publicSlug,
+          customDomain: service.domainType === "custom" ? customDomain : undefined,
+          domainType: service.domainType === "custom" ? "custom" : "free",
+        }]
+      : undefined,
   };
 }
 
@@ -299,8 +299,8 @@ export async function deployComposeServices(
       },
       services: [],
       error: hasServices
-        ? "All compose services are currently disabled. Re-syncing the compose file should re-enable them."
-        : "No compose services were found for this project. Sync the compose file before deploying.",
+        ? "All project services are currently disabled. Enable at least one service before deploying."
+        : "No services were found for this project. Add a service or sync a compose file before deploying.",
     };
   }
 
@@ -308,7 +308,7 @@ export async function deployComposeServices(
   const ordered = topoSort(enabled);
 
   logger.step("deploy", "running", `Deploying ${ordered.length} services...`);
-  logger.log("Preparing shared service group for compose deployment...\n");
+  logger.log("Preparing shared service group for project services...\n");
 
   // 1. Ensure shared runtime group (Docker network or cloud service group)
   const group = await runtime.ensureServiceGroup({
@@ -636,11 +636,7 @@ export async function deployComposeServices(
         serviceName: svc.name,
       });
 
-      if (
-        previous?.imageRef &&
-        previous.imageRef !== image &&
-        runtime instanceof DockerRuntime
-      ) {
+      if (previous?.imageRef && previous.imageRef !== image && runtime instanceof DockerRuntime) {
         await runtime.removeImage(previous.imageRef).catch((err) => {
           const message = err instanceof Error ? err.message : "Unknown error";
           logger.log(
@@ -676,8 +672,7 @@ export async function deployComposeServices(
       const message = err instanceof Error ? err.message : "Unknown error";
       if (deployedContainerId && !deployedContainerCleaned) {
         await runtime.destroy(deployedContainerId).catch((destroyErr) => {
-          const destroyMessage =
-            destroyErr instanceof Error ? destroyErr.message : "Unknown error";
+          const destroyMessage = destroyErr instanceof Error ? destroyErr.message : "Unknown error";
           logger.log(
             `Warning: failed to clean up "${svc.name}" after deploy failure: ${destroyMessage}\n`,
             "warn",

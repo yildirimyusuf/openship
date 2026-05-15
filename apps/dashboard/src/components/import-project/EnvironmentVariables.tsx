@@ -62,6 +62,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
   const deployment = useOptionalDeployment();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pasteZoneRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [internalIsEditingMode, setInternalIsEditingMode] = useState(mode === "deploy");
   
@@ -129,121 +130,186 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
     updateEnvVar(index, "value", value);
   };
 
-  // Smart paste: intercept paste in KEY/VALUE inputs, detect multi-line KEY=VALUE format
-  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>, index: number) => {
-    const text = e.clipboardData.getData('text');
-    if (!text) return;
+  const mergeParsedEnvVars = useCallback(
+    (parsed: EnvironmentVariableRow[], replaceEmptyRowIndex?: number) => {
+      const existingMap = new Map(currentEnvVars.map((env, idx) => [env.key, idx]));
+      const merged = [...currentEnvVars];
+      const currentRow =
+        typeof replaceEmptyRowIndex === "number" ? merged[replaceEmptyRowIndex] : undefined;
+      const shouldRemoveEmptyRow =
+        typeof replaceEmptyRowIndex === "number" &&
+        currentRow !== undefined &&
+        !currentRow.key &&
+        !currentRow.value;
 
-    // Check if pasted text looks like env format (has at least one KEY=VALUE line)
-    const lines = text.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
-    const envLines = lines.filter(l => {
-      const eqIdx = l.indexOf('=');
-      if (eqIdx <= 0) return false;
-      const key = l.substring(0, eqIdx).trim();
-      return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
-    });
+      let added = 0;
+      let updated = 0;
 
-    // Only intercept if we detect multiple env lines, or a single KEY=VALUE that differs from a plain value
-    if (envLines.length < 2 && (envLines.length === 0 || !text.includes('\n'))) return;
-
-    e.preventDefault();
-
-    const parsed = parseEnvFile(text);
-    if (parsed.length === 0) return;
-
-    // Merge: update existing keys, add new ones
-    const existingMap = new Map(currentEnvVars.map((v, i) => [v.key, i]));
-    const merged = [...currentEnvVars];
-
-    // Remove the current empty row if it was the target of the paste
-    const currentRow = merged[index];
-    const isEmptyRow = currentRow && !currentRow.key && !currentRow.value;
-
-    let added = 0;
-    let updated = 0;
-    for (const pv of parsed) {
-      const existingIdx = existingMap.get(pv.key);
-      if (existingIdx !== undefined) {
-        merged[existingIdx] = { ...merged[existingIdx], value: pv.value };
-        updated++;
-      } else {
-        merged.push(pv);
-        added++;
+      for (const nextVar of parsed) {
+        const existingIdx = existingMap.get(nextVar.key);
+        if (existingIdx !== undefined) {
+          merged[existingIdx] = { ...merged[existingIdx], value: nextVar.value };
+          updated++;
+        } else {
+          merged.push(nextVar);
+          added++;
+        }
       }
+
+      if (shouldRemoveEmptyRow) {
+        merged.splice(replaceEmptyRowIndex, 1);
+      }
+
+      updateEnvVars(merged);
+      return { added, updated };
+    },
+    [currentEnvVars, updateEnvVars]
+  );
+
+  const showEnvPasteResult = useCallback(
+    (parsedCount: number, added: number, updated: number) => {
+      const parts: string[] = [];
+      if (added > 0) parts.push(`${added} added`);
+      if (updated > 0) parts.push(`${updated} updated`);
+
+      showToast(
+        `Pasted ${parsedCount} variable${parsedCount !== 1 ? "s" : ""}${parts.length ? ` (${parts.join(", ")})` : ""}`,
+        "success",
+        "Environment Variables"
+      );
+    },
+    [showToast]
+  );
+
+  const maybeAutoApplyDetectedPort = useCallback(
+    (parsedVars: EnvironmentVariableRow[]) => {
+      if (mode !== "deploy" || !deployment?.config.options.hasServer) {
+        return;
+      }
+
+      const detectedPort = detectContainerPort(parsedVars);
+      if (!detectedPort) {
+        return;
+      }
+
+      const currentPort = deployment.config.options.productionPort.trim();
+      const lastAutoDetectedPort = deployment.config.lastAutoDetectedEnvPort?.trim() || "";
+      const canAutoApply =
+        !deployment.config.productionPortTouched &&
+        (currentPort === "" || currentPort === lastAutoDetectedPort || lastAutoDetectedPort === "");
+
+      if (!canAutoApply || currentPort === detectedPort) {
+        return;
+      }
+
+      deployment.updateConfig({
+        lastAutoDetectedEnvPort: detectedPort,
+        options: {
+          ...deployment.config.options,
+          productionPort: detectedPort,
+        },
+      });
+      showToast(`Runtime port set to ${detectedPort} from PORT`, "success", "Environment Variables");
+    },
+    [deployment, mode, showToast]
+  );
+
+  const applyEnvText = useCallback(
+    (text: string, replaceEmptyRowIndex?: number) => {
+      const parsed = parseEnvFile(text);
+      if (parsed.length === 0) {
+        return false;
+      }
+
+      const { added, updated } = mergeParsedEnvVars(parsed, replaceEmptyRowIndex);
+      maybeAutoApplyDetectedPort(parsed);
+      showEnvPasteResult(parsed.length, added, updated);
+      return true;
+    },
+    [maybeAutoApplyDetectedPort, mergeParsedEnvVars, showEnvPasteResult]
+  );
+
+  const handleContainerPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
+      if (!isEditingMode) return;
+
+      const text = e.clipboardData.getData("text");
+      if (!text) return;
+
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const isTextInputPaste = Boolean(target?.closest("input, textarea, [contenteditable='true']"));
+
+      if (!looksLikeEnvPaste(text, !isTextInputPaste)) {
+        return;
+      }
+
+      e.preventDefault();
+
+      const rowIndex = target ? getEnvRowIndexFromTarget(target) : undefined;
+      const replaceEmptyRowIndex =
+        typeof rowIndex === "number" &&
+        currentEnvVars[rowIndex] &&
+        !currentEnvVars[rowIndex].key &&
+        !currentEnvVars[rowIndex].value
+          ? rowIndex
+          : undefined;
+
+      applyEnvText(text, replaceEmptyRowIndex);
+    },
+    [applyEnvText, currentEnvVars, isEditingMode]
+  );
+
+  const handlePasteFromClipboard = useCallback(async () => {
+    if (!isEditingMode) return;
+
+    if (
+      typeof navigator === "undefined" ||
+      typeof window === "undefined" ||
+      !window.isSecureContext ||
+      !navigator.clipboard?.readText
+    ) {
+      showToast(
+        "Clipboard access is not available here. Click inside the environment box and paste with Cmd/Ctrl+V.",
+        "error",
+        "Environment Variables"
+      );
+      return;
     }
 
-    // Remove the empty row that triggered the paste
-    if (isEmptyRow) {
-      merged.splice(index, 1);
+    try {
+      const text = await navigator.clipboard.readText();
+
+      if (!text.trim()) {
+        showToast("Clipboard is empty", "error", "Environment Variables");
+        return;
+      }
+
+      if (!looksLikeEnvPaste(text, true) || !applyEnvText(text)) {
+        showToast(
+          "Clipboard does not contain valid KEY=VALUE environment variables",
+          "error",
+          "Environment Variables"
+        );
+      }
+    } catch {
+      showToast(
+        "Clipboard access was blocked. Click inside the environment box and paste with Cmd/Ctrl+V.",
+        "error",
+        "Environment Variables"
+      );
+    }
+  }, [applyEnvText, isEditingMode, showToast]);
+
+  const handlePasteZoneClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isEditingMode) return;
+
+    const target = e.target as HTMLElement;
+    if (target.closest("input, button, a, select, textarea, label")) {
+      return;
     }
 
-    updateEnvVars(merged);
-
-    const parts: string[] = [];
-    if (added > 0) parts.push(`${added} added`);
-    if (updated > 0) parts.push(`${updated} updated`);
-    showToast(`Pasted ${parsed.length} variable${parsed.length !== 1 ? 's' : ''}${parts.length ? ` (${parts.join(', ')})` : ''}`, "success", "Environment Variables");
-  }, [currentEnvVars, updateEnvVars, showToast]);
-
-  const parseEnvFile = (content: string) => {
-    const lines = content.split('\n');
-    const parsed: EnvironmentVariableRow[] = [];
-
-    lines.forEach((line) => {
-      // Skip empty lines
-      const trimmedLine = line.trim();
-      if (!trimmedLine) return;
-
-      // Skip comment lines (lines starting with #)
-      if (trimmedLine.startsWith('#')) return;
-
-      // Find the first = sign to split key and value
-      const equalIndex = trimmedLine.indexOf('=');
-      if (equalIndex === -1) return; // No = sign, skip this line
-
-      // Extract key and value
-      const key = trimmedLine.substring(0, equalIndex).trim();
-      let value = trimmedLine.substring(equalIndex + 1).trim();
-
-      // Validate key format (must start with letter or underscore, followed by alphanumeric or underscore)
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return;
-
-      // Handle quoted values
-      if (value.startsWith('"')) {
-        // Double-quoted value - find the closing quote
-        const closingQuoteIndex = value.indexOf('"', 1);
-        if (closingQuoteIndex !== -1) {
-          value = value.substring(1, closingQuoteIndex);
-        } else {
-          // No closing quote, take everything after opening quote
-          value = value.substring(1);
-        }
-      } else if (value.startsWith("'")) {
-        // Single-quoted value - find the closing quote
-        const closingQuoteIndex = value.indexOf("'", 1);
-        if (closingQuoteIndex !== -1) {
-          value = value.substring(1, closingQuoteIndex);
-        } else {
-          // No closing quote, take everything after opening quote
-          value = value.substring(1);
-        }
-      } else {
-        // Unquoted value - remove inline comments
-        // Split by # but only if it's preceded by whitespace (to avoid breaking values with #)
-        const commentMatch = value.match(/\s+#/);
-        if (commentMatch && commentMatch.index !== undefined) {
-          value = value.substring(0, commentMatch.index).trim();
-        }
-      }
-
-      // Only add if we have a valid key (value can be empty)
-      if (key) {
-        parsed.push({ key, value, visible: false });
-      }
-    });
-
-    return parsed;
-  };
+    pasteZoneRef.current?.focus();
+  }, [isEditingMode]);
 
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -259,6 +325,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         const existingKeys = new Set(currentEnvVars.map(v => v.key));
         const newVars = parsedVars.filter(v => !existingKeys.has(v.key));
         updateEnvVars([...currentEnvVars, ...newVars]);
+        maybeAutoApplyDetectedPort(parsedVars);
       }
     };
     reader.readAsText(file);
@@ -267,7 +334,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
-  }, [updateEnvVars, currentEnvVars]);
+  }, [currentEnvVars, maybeAutoApplyDetectedPort, updateEnvVars]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -297,6 +364,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         const existingKeys = new Set(currentEnvVars.map(v => v.key));
         const newVars = parsedVars.filter(v => !existingKeys.has(v.key));
         updateEnvVars([...currentEnvVars, ...newVars]);
+        maybeAutoApplyDetectedPort(parsedVars);
       }
     };
     reader.readAsText(file);
@@ -347,7 +415,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         processFile(file);
       }
     });
-  }, [currentEnvVars, updateEnvVars]);
+  }, [processFile]);
 
   return (
     <div className={borderless ? '' : 'bg-card rounded-2xl border border-border/50'}>
@@ -385,6 +453,13 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
                 </button>
               )}
               <button
+                onClick={() => void handlePasteFromClipboard()}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
+              >
+                <FileText className="size-3.5" />
+                Paste .env
+              </button>
+              <button
                 onClick={handleUploadClick}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
               >
@@ -403,13 +478,22 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
             </>
           )}
           {mode === "deploy" && isEditingMode && (
-            <button
-              onClick={handleUploadClick}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
-            >
-              <Upload className="size-3.5" />
-              Upload .env
-            </button>
+            <>
+              <button
+                onClick={() => void handlePasteFromClipboard()}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
+              >
+                <FileText className="size-3.5" />
+                Paste .env
+              </button>
+              <button
+                onClick={handleUploadClick}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
+              >
+                <Upload className="size-3.5" />
+                Upload .env
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -423,21 +507,25 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
       />
 
       <div
+        ref={pasteZoneRef}
         className={`px-5 pb-5 space-y-3 pt-4 transition-all ${
           borderless ? 'rounded-b-xl' : 'border-t border-border/50 rounded-b-2xl'
         } ${
           isDragging ? 'ring-2 ring-primary/30 bg-primary/5' : ''
         }`}
+        tabIndex={isEditingMode ? 0 : -1}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
+        onPasteCapture={handleContainerPaste}
+        onClick={handlePasteZoneClick}
       >
         {currentEnvVars.map((env, index) => {
           const resolution = getEnvResolutionState(envMeta?.[env.key], env.value);
           const inputStateClass = resolution?.inputClass ?? "";
           return (
-            <div key={index} className="space-y-1.5">
+            <div key={index} data-env-index={index} className="space-y-1.5">
               {resolution && (
                 <div className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium ${resolution.badgeClass}`}>
                   <EnvResolutionIcon icon={resolution.icon} />
@@ -449,7 +537,6 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
                   type="text"
                   value={env.key}
                   onChange={(e) => handleKeyChange(index, e.target.value)}
-                  onPaste={(e) => handlePaste(e, index)}
                   placeholder="KEY"
                   readOnly={!isEditingMode}
                   className={`flex-1 px-3.5 py-2.5 border border-border/50 rounded-lg text-sm font-mono text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${
@@ -461,7 +548,6 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
                     type={env.visible ? "text" : "password"}
                     value={env.value}
                     onChange={(e) => handleValueChange(index, e.target.value)}
-                    onPaste={(e) => handlePaste(e, index)}
                     placeholder="value"
                     readOnly={!isEditingMode}
                     className={`w-full px-3.5 py-2.5 pr-9 border border-border/50 rounded-lg text-sm font-mono text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${
@@ -506,14 +592,18 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
             </p>
             <p className="text-xs text-muted-foreground max-w-xs">
               {isEditingMode
-                ? 'Click "Add Variable" below, "Upload .env", or drag and drop a .env file here'
+                ? 'Click "Add Variable", use "Paste .env", upload a file, or paste anywhere inside this box'
                 : 'Click "Edit" to manage environment variables'}
             </p>
           </div>
         )}
 
         {isEditingMode && (
-          <div className="flex items-center gap-2">
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Paste a full .env block anywhere inside this box.
+            </p>
+            <div className="flex items-center gap-2">
             <button
               onClick={addEnvVar}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-lg transition-colors"
@@ -521,12 +611,86 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
               <Plus className="size-3.5" />
               Add Variable
             </button>
+            </div>
           </div>
         )}
       </div>
     </div>
   );
 };
+
+function parseEnvFile(content: string) {
+  const lines = content.split(/\r?\n/);
+  const parsed: EnvironmentVariableRow[] = [];
+
+  lines.forEach((line) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith("#")) return;
+
+    const equalIndex = trimmedLine.indexOf("=");
+    if (equalIndex === -1) return;
+
+    const key = trimmedLine.substring(0, equalIndex).trim();
+    let value = trimmedLine.substring(equalIndex + 1).trim();
+
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return;
+
+    if (value.startsWith('"')) {
+      const closingQuoteIndex = value.indexOf('"', 1);
+      value = closingQuoteIndex !== -1 ? value.substring(1, closingQuoteIndex) : value.substring(1);
+    } else if (value.startsWith("'")) {
+      const closingQuoteIndex = value.indexOf("'", 1);
+      value = closingQuoteIndex !== -1 ? value.substring(1, closingQuoteIndex) : value.substring(1);
+    } else {
+      const commentMatch = value.match(/\s+#/);
+      if (commentMatch && commentMatch.index !== undefined) {
+        value = value.substring(0, commentMatch.index).trim();
+      }
+    }
+
+    parsed.push({ key, value, visible: false });
+  });
+
+  return parsed;
+}
+
+function looksLikeEnvPaste(content: string, allowSingleLine: boolean) {
+  const lines = content.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith("#"));
+  const envLines = lines.filter((line) => {
+    const equalIndex = line.indexOf("=");
+    if (equalIndex <= 0) return false;
+    const key = line.substring(0, equalIndex).trim();
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+  });
+
+  if (envLines.length >= 2) {
+    return true;
+  }
+
+  return allowSingleLine && envLines.length === 1;
+}
+
+function getEnvRowIndexFromTarget(target: HTMLElement) {
+  const row = target.closest<HTMLElement>("[data-env-index]");
+  if (!row?.dataset.envIndex) return undefined;
+
+  const index = Number(row.dataset.envIndex);
+  return Number.isInteger(index) ? index : undefined;
+}
+
+function detectContainerPort(envVars: EnvironmentVariableRow[]) {
+  const portValue = envVars.find((env) => env.key.trim().toUpperCase() === "PORT")?.value?.trim();
+  if (!portValue || !/^\d+$/.test(portValue)) {
+    return null;
+  }
+
+  const port = Number(portValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+
+  return String(port);
+}
 
 function getEnvResolutionState(meta: EnvironmentVariableMeta | undefined, value: string) {
   if (!meta) return null;

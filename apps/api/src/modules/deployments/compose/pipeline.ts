@@ -1,14 +1,15 @@
 /**
- * Compose pipeline — orchestrates the full build→deploy lifecycle for
- * multi-service (docker-compose) projects.
+ * Project service pipeline — orchestrates the full build/deploy lifecycle for
+ * projects with child services. Compose is one importer for those services.
  *
- * This is the compose equivalent of the single-app pipeline that lives
+ * This is the service equivalent of the single-app pipeline that lives
  * in build.service.ts. It coordinates:
  *   1. Per-service image builds  (compose/build.service)
  *   2. Multi-container deployment (compose/deploy.service)
  *   3. Lifecycle hooks            (shared deployment-lifecycle)
  *
- * Called from build.service.ts when the project is detected as compose.
+ * Called from build.service.ts when the project has saved services or a deploy
+ * request includes parsed compose services.
  */
 
 import { repos } from "@repo/db";
@@ -57,7 +58,7 @@ export interface ComposePipelineOpts {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 /**
- * Run the full compose pipeline: build all service images → deploy containers.
+ * Run the full service pipeline: build service images, then deploy containers.
  *
  * Handles its own success/failure lifecycle — callers should return immediately
  * after this function completes.
@@ -100,7 +101,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
       "warn",
     );
   } else {
-    logger.log("Build phase complete. Starting compose service deployment...\n");
+    logger.log("Build phase complete. Starting project service deployment...\n");
   }
   await repos.deployment.updateStatus(dep.id, "deploying", {
     buildDurationMs: composeBuild.durationMs,

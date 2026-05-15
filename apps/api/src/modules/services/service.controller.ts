@@ -7,7 +7,11 @@ import { streamSSE } from "../../lib/sse";
 import { getUserId, param } from "../../lib/controller-helpers";
 import { sshManager } from "../../lib/ssh-manager";
 import * as serviceService from "./service.service";
-import type { TUpdateServiceBody, TSetServiceEnvVarsBody } from "./service.schema";
+import type {
+  TCreateServiceBody,
+  TUpdateServiceBody,
+  TSetServiceEnvVarsBody,
+} from "./service.schema";
 
 // ─── List services for a project ─────────────────────────────────────────────
 
@@ -41,7 +45,21 @@ export async function getById(c: Context) {
   }
 }
 
-// ─── Update service config ───────────────────────────────────────────────────
+// ─── Create / update / delete service config ─────────────────────────────────
+
+export async function create(c: Context) {
+  const userId = getUserId(c);
+  const projectId = param(c, "id");
+  const body = await c.req.json<TCreateServiceBody>();
+
+  try {
+    const svc = await serviceService.createService(projectId, userId, body);
+    return c.json({ success: true, service: svc }, 201);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to create service";
+    return c.json({ success: false, error: message }, 400);
+  }
+}
 
 export async function update(c: Context) {
   const userId = getUserId(c);
@@ -54,6 +72,20 @@ export async function update(c: Context) {
     return c.json({ success: true, service: svc });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to update service";
+    return c.json({ success: false, error: message }, 400);
+  }
+}
+
+export async function remove(c: Context) {
+  const userId = getUserId(c);
+  const projectId = param(c, "id");
+  const serviceId = param(c, "serviceId");
+
+  try {
+    await serviceService.deleteService(projectId, serviceId, userId);
+    return c.json({ success: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to delete service";
     return c.json({ success: false, error: message }, 400);
   }
 }
@@ -134,6 +166,10 @@ export async function syncFromCompose(c: Context) {
     return c.json({ success: false, error: "services array is required" }, 400);
   }
 
+  if (body.services.length === 0) {
+    return c.json({ success: false, error: "Refusing to sync an empty compose service list" }, 400);
+  }
+
   try {
     const services = await serviceService.syncComposeServices(projectId, userId, body.services);
     return c.json({ success: true, services });
@@ -210,18 +246,24 @@ export async function runtimeLogStream(c: Context) {
     let serverId: string | null = null;
 
     try {
-      const result = await serviceService.streamServiceRuntimeLogs(projectId, serviceId, userId, (entry) => {
-        void sseStream.writeSSE({
-          event: "log",
-          data: JSON.stringify({
-            type: "log",
-            data: entry.rawData,
-            message: entry.message,
-            timestamp: entry.timestamp,
-            level: entry.level,
-          }),
-        });
-      }, { tail });
+      const result = await serviceService.streamServiceRuntimeLogs(
+        projectId,
+        serviceId,
+        userId,
+        (entry) => {
+          void sseStream.writeSSE({
+            event: "log",
+            data: JSON.stringify({
+              type: "log",
+              data: entry.rawData,
+              message: entry.message,
+              timestamp: entry.timestamp,
+              level: entry.level,
+            }),
+          });
+        },
+        { tail },
+      );
 
       cleanup = result.cleanup;
       serverId = result.serverId;

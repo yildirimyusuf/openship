@@ -186,6 +186,7 @@ export const GitSettings = () => {
               loading={false}
               loadingRepos={github.loadingRepos}
               onSelect={handleLinkRepo}
+              installUrl={github.installUrl}
             />
           </div>
         </Modal>

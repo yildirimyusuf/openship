@@ -18,6 +18,7 @@ export const BuildSettings = () => {
     productionPaths: false,
     startCommand: false,
     productionPort: false,
+    buildImage: false,
   });
 
   const { showToast } = useToast();
@@ -50,8 +51,10 @@ export const BuildSettings = () => {
           buildData={buildData}
           buildConfig={{
             options: buildData,
+            buildImage: buildData.buildImage,
             updateOptions: updateBuild,
             framework: projectData?.framework,
+            packageManager: projectData?.packageManager,
           }}
           onSave={handleSaveField}
           loading={loading}

@@ -13,6 +13,8 @@ import { generateIcon } from "@/utils/icons";
 import { useRouter } from "next/navigation";
 import { encodeRepoSlug } from "@/utils/repoSlug";
 import { useDeployment } from "@/context/DeploymentContext";
+import { getPublicEndpointHosts } from "@/context/deployment/types";
+import { resolveBuildElapsedMs } from "@/context/deployment/types";
 import { usePlatform } from "@/context/PlatformContext";
 import { useTheme } from "@/components/theme-provider";
 import { useModal } from "@/context/ModalContext";
@@ -106,9 +108,9 @@ const DeploymentProcessing: React.FC<DeploymentProcessingProps> = ({ onRedeploy 
   }, [state.pendingPrompt, showModal, hideModal, respondToPrompt, renderPromptDetails]);
 
   // Build domain for display
-  const domain = config.domainType === "free"
-    ? `${config.domain || config.projectName}.${baseDomain}`
-    : config.customDomain;
+  const endpointHosts = getPublicEndpointHosts(config.publicEndpoints, baseDomain, config.projectName);
+  const domain = endpointHosts[0] ?? "";
+  const extraEndpointCount = endpointHosts.length > 1 ? endpointHosts.length - 1 : 0;
 
   const handleTerminalReady = useCallback((terminal: Terminal) => {
     if (terminalRef) {
@@ -508,30 +510,24 @@ const DeploymentDetails = memo(() => {
   const { state, deploymentStatus, config } = useDeployment();
   const { baseDomain } = usePlatform();
   const [buildTime, setBuildTime] = useState<number>(() => {
-    // Initialize from persisted duration if available
-    if (state.buildDurationMs) return Math.round(state.buildDurationMs / 1000);
-    // For in-progress builds, calculate elapsed from startedAt
-    if (state.buildStartedAt) {
-      return Math.max(0, Math.round((Date.now() - new Date(state.buildStartedAt).getTime()) / 1000));
-    }
-    return 0;
+    return Math.round(resolveBuildElapsedMs(state) / 1000);
   });
   const router = useRouter();
   const hasWarning = deploymentStatus === "ready" && !!state.warningMessage;
+  const endpointHosts = getPublicEndpointHosts(config.publicEndpoints, baseDomain, config.projectName);
+  const domain = endpointHosts[0] ?? "";
+  const extraEndpointCount = endpointHosts.length > 1 ? endpointHosts.length - 1 : 0;
 
-  // Sync elapsed time when buildStartedAt arrives from API (e.g. after refresh)
   useEffect(() => {
-    if (state.buildStartedAt && !state.deploymentSuccess && !state.deploymentFailed && !state.deploymentCanceled) {
-      setBuildTime(Math.max(0, Math.round((Date.now() - new Date(state.buildStartedAt).getTime()) / 1000)));
-    }
-  }, [state.buildStartedAt, state.deploymentSuccess, state.deploymentFailed, state.deploymentCanceled]);
-
-  // Sync final duration when build completes
-  useEffect(() => {
-    if (state.buildDurationMs && (state.deploymentSuccess || state.deploymentFailed || state.deploymentCanceled)) {
-      setBuildTime(Math.round(state.buildDurationMs / 1000));
-    }
-  }, [state.buildDurationMs, state.deploymentSuccess, state.deploymentFailed, state.deploymentCanceled]);
+    setBuildTime(Math.round(resolveBuildElapsedMs(state) / 1000));
+  }, [
+    state.buildDurationMs,
+    state.buildStartedAt,
+    state.buildRetryCarryMs,
+    state.deploymentSuccess,
+    state.deploymentFailed,
+    state.deploymentCanceled,
+  ]);
 
   useEffect(() => {
     if (state.deploymentSuccess || state.deploymentFailed || state.deploymentCanceled) {
@@ -607,8 +603,11 @@ const DeploymentDetails = memo(() => {
           </span>
         </div>
         <div className="flex justify-between items-center py-1.5 border-b border-border/50">
-          <span className="text-sm text-muted-foreground">Domain</span>
-          <span className="text-sm font-normal text-foreground">{config.domainType === "free" ? `${config.domain || config.projectName}.${baseDomain}` : config.customDomain}</span>
+          <span className="text-sm text-muted-foreground">{extraEndpointCount > 0 ? "Domains" : "Domain"}</span>
+          <span className="text-sm font-normal text-foreground">
+            {domain}
+            {extraEndpointCount > 0 ? ` +${extraEndpointCount} more` : ""}
+          </span>
         </div>
         <div className="flex justify-between items-center py-1.5 border-b border-border/50">
           <span className="text-sm text-muted-foreground">Branch</span>

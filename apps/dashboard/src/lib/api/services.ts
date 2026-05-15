@@ -10,6 +10,7 @@ export interface Service {
   name: string;
   image: string | null;
   build: string | null;
+  dockerfile: string | null;
   ports: string[] | null;
   dependsOn: string[] | null;
   environment: Record<string, string> | null;
@@ -43,6 +44,26 @@ export interface ServiceEnvVar {
   environment: string;
 }
 
+export type ServiceInput = {
+  name: string;
+  image?: string;
+  build?: string;
+  dockerfile?: string;
+  ports?: string[];
+  dependsOn?: string[];
+  environment?: Record<string, string>;
+  volumes?: string[];
+  command?: string;
+  restart?: string;
+  exposed?: boolean;
+  exposedPort?: string;
+  domain?: string;
+  customDomain?: string;
+  domainType?: "free" | "custom";
+  enabled?: boolean;
+  sortOrder?: number;
+};
+
 /* ------------------------------------------------------------------ */
 /*  Services API (compose / multi-service projects)                   */
 /* ------------------------------------------------------------------ */
@@ -50,48 +71,36 @@ export interface ServiceEnvVar {
 export const servicesApi = {
   /** List all services for a project */
   list: (projectId: string | number) =>
-    api.get<{ success: boolean; services: Service[] }>(
-      endpoints.services.list(projectId),
-    ),
+    api.get<{ success: boolean; services: Service[] }>(endpoints.services.list(projectId)),
 
   /** Get a single service */
   get: (projectId: string | number, serviceId: string) =>
-    api.get<{ success: boolean; service: Service }>(
-      endpoints.services.get(projectId, serviceId),
-    ),
+    api.get<{ success: boolean; service: Service }>(endpoints.services.get(projectId, serviceId)),
+
+  /** Create a service manually */
+  create: (projectId: string | number, data: ServiceInput) =>
+    api.post<{ success: boolean; service: Service }>(endpoints.services.create(projectId), data),
 
   /** Update a service configuration */
-  update: (projectId: string | number, serviceId: string, data: Partial<Service>) =>
+  update: (
+    projectId: string | number,
+    serviceId: string,
+    data: Partial<Service> | Partial<ServiceInput>,
+  ) =>
     api.patch<{ success: boolean; service: Service }>(
       endpoints.services.update(projectId, serviceId),
       data,
     ),
 
+  /** Delete a service */
+  delete: (projectId: string | number, serviceId: string) =>
+    api.delete<{ success: boolean }>(endpoints.services.delete(projectId, serviceId)),
+
   /** Sync services from compose file parse result */
-  sync: (
-    projectId: string | number,
-    services: Array<{
-      name: string;
-      image?: string;
-      build?: string;
-      dockerfile?: string;
-      ports?: string[];
-      dependsOn?: string[];
-      environment?: Record<string, string>;
-      volumes?: string[];
-      command?: string;
-      restart?: string;
-      exposed?: boolean;
-      exposedPort?: string;
-      domain?: string;
-      customDomain?: string;
-      domainType?: "free" | "custom";
-    }>,
-  ) =>
-    api.post<{ success: boolean; services: Service[] }>(
-      endpoints.services.sync(projectId),
-      { services },
-    ),
+  sync: (projectId: string | number, services: ServiceInput[]) =>
+    api.post<{ success: boolean; services: Service[] }>(endpoints.services.sync(projectId), {
+      services,
+    }),
 
   /** Get active containers for all services */
   containers: (projectId: string | number) =>
@@ -121,19 +130,13 @@ export const servicesApi = {
 
   /** Start a service container */
   start: (projectId: string | number, serviceId: string) =>
-    api.post<{ success: boolean }>(
-      endpoints.services.start(projectId, serviceId),
-    ),
+    api.post<{ success: boolean }>(endpoints.services.start(projectId, serviceId)),
 
   /** Stop a service container */
   stop: (projectId: string | number, serviceId: string) =>
-    api.post<{ success: boolean }>(
-      endpoints.services.stop(projectId, serviceId),
-    ),
+    api.post<{ success: boolean }>(endpoints.services.stop(projectId, serviceId)),
 
   /** Restart a service container */
   restart: (projectId: string | number, serviceId: string) =>
-    api.post<{ success: boolean }>(
-      endpoints.services.restart(projectId, serviceId),
-    ),
+    api.post<{ success: boolean }>(endpoints.services.restart(projectId, serviceId)),
 };

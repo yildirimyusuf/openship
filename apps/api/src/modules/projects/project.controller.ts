@@ -11,6 +11,7 @@ import type { Context } from "hono";
 import { streamSSE } from "../../lib/sse";
 import { getUserId, param } from "../../lib/controller-helpers";
 import * as projectService from "./project.service";
+import { AppError } from "@repo/core";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
@@ -18,12 +19,12 @@ import type {
   TSetEnvVarsBody,
   TUpdateResourcesBody,
 } from "./project.schema";
-import { detectStack, MANIFEST_FILES, type RepoFile } from "../../lib/stack-detector";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { repos, type Domain, type Project } from "@repo/db";
 import { deployLuaScripts } from "@repo/adapters";
 import { getOpenRestyPaths } from "@/lib/openresty-paths";
 import * as domainService from "../domains/domain.service";
+import * as prepareService from "../deployments/prepare.service";
 import { sshManager } from "../../lib/ssh-manager";
 import { env, internalApiUrl, runtimeTarget } from "../../config";
 import { resolveProjectTrafficSource, fetchMgmt, mgmtStream } from "../../lib/project-analytics";
@@ -43,9 +44,37 @@ import {
 } from "../github/github.service";
 import { getInstallationId, getInstallUrl } from "../github/github.auth";
 import { platform } from "../../lib/controller-helpers";
+import { listProjectRouteRows, resolveProjectRouteState } from "../domains/project-route.service";
 
 // Track which servers have had Lua scripts deployed this session
 const luaDeployedServers = new Set<string>();
+
+function logEnsureProjectError(
+  userId: string,
+  body: TCreateProjectBody & { projectId?: string },
+  err: unknown,
+) {
+  console.error("[PROJECT] Failed to ensure project", {
+    userId,
+    projectId: body.projectId,
+    name: body.name,
+    slug: body.slug,
+    gitBranch: body.gitBranch,
+    port: body.port,
+    publicEndpoints: body.publicEndpoints?.map((endpoint) => ({
+      port: endpoint.port,
+      targetPath: endpoint.targetPath,
+      domain: endpoint.domain,
+      customDomain: endpoint.customDomain,
+      domainType: endpoint.domainType,
+    })),
+  });
+  console.error(err);
+
+  if (err instanceof Error && err.cause) {
+    console.error("[PROJECT] Ensure project cause:", err.cause);
+  }
+}
 
 // ─── Ensure project ──────────────────────────────────────────────────────────
 
@@ -61,8 +90,16 @@ export async function ensure(c: Context) {
     const result = await projectService.ensureProject(userId, body);
     return c.json(result);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to ensure project";
-    return c.json({ success: false, error: message }, 400);
+    logEnsureProjectError(userId, body, err);
+
+    if (err instanceof AppError) {
+      return c.json(
+        { success: false, error: err.message, code: err.code },
+        err.statusCode as 400 | 401 | 403 | 404 | 409 | 500,
+      );
+    }
+
+    return c.json({ success: false, error: "Failed to ensure project" }, 500);
   }
 }
 
@@ -76,10 +113,11 @@ export async function getHome(c: Context) {
     // Enrich each project with computed fields + latest deployment info
     const projects = await Promise.all(
       result.rows.map(async (p) => {
-        const [enriched, latest, primary] = await Promise.all([
+        const [enriched, latest, primary, services] = await Promise.all([
           projectService.enrichProject(p),
           repos.deployment.findLatestByProject(p.id),
           repos.domain.getPrimaryByProject(p.id),
+          repos.service.listByProject(p.id),
         ]);
 
         refreshProjectFaviconIfStale(p, {
@@ -91,6 +129,8 @@ export async function getHome(c: Context) {
           latestDeploymentId: latest?.id ?? null,
           latestDeploymentStatus: latest?.status ?? null,
           primaryDomain: primary?.hostname ?? null,
+          serviceCount: services.length,
+          hasMultipleServices: services.length > 1,
         };
       }),
     );
@@ -240,42 +280,25 @@ export async function scanLocal(c: Context) {
     return c.json({ error: "Directory not found" }, 404);
   }
 
-  // Read top-level files for stack detection
-  const entries = await readdir(dirPath, { withFileTypes: true });
-  const files: RepoFile[] = entries.map((e) => ({
-    name: e.name,
-    type: e.isDirectory() ? "dir" : "file",
-  }));
-
-  // Try reading package.json if exists
-  let packageJson: Record<string, unknown> | undefined;
-  try {
-    const raw = await readFile(`${dirPath}/package.json`, "utf-8");
-    packageJson = JSON.parse(raw);
-  } catch {
-    // No package.json or invalid — that's fine
-  }
-
-  // Read manifest files for deep stack detection
-  const manifests: Record<string, string> = {};
-  await Promise.all(
-    MANIFEST_FILES.map(async (name) => {
-      try {
-        manifests[name] = await readFile(`${dirPath}/${name}`, "utf-8");
-      } catch {
-        /* skip */
-      }
-    }),
-  );
-
-  const result = detectStack(files, packageJson, manifests);
-  const dirName = dirPath.split("/").filter(Boolean).pop() ?? "project";
+  const result = await prepareService.resolveProjectInfo({ source: "local", path: dirPath });
 
   return c.json({
     success: true,
-    name: (packageJson?.name as string) ?? dirName,
+    name: result.repository.name,
     path: dirPath,
-    ...result,
+    stack: result.stack,
+    projectType: result.projectType,
+    category: result.category,
+    packageManager: result.packageManager,
+    installCommand: result.installCommand,
+    buildCommand: result.buildCommand,
+    startCommand: result.startCommand,
+    buildImage: result.buildImage,
+    outputDirectory: result.outputDirectory,
+    rootDirectory: result.rootDirectory,
+    productionPaths: result.productionPaths,
+    port: result.port,
+    services: result.services,
   });
 }
 
@@ -708,9 +731,7 @@ export async function linkRepo(c: Context) {
 
   // Update git fields on the project
   const gitUrl = `https://github.com/${owner}/${repo}.git`;
-  const defaultBranch =
-    branch?.trim() ||
-    (await getRepository(userId, owner, repo)).default_branch;
+  const defaultBranch = branch?.trim() || (await getRepository(userId, owner, repo)).default_branch;
 
   const gitFields: Record<string, unknown> = {
     gitProvider: "github",
@@ -1199,6 +1220,8 @@ export async function getInfo(c: Context) {
   const project = await projectService.getProject(id, userId);
   const environments = await projectService.listProjectEnvironments(id, userId);
   const hasServer = project.hasServer ?? project.productionMode === "host";
+  const serviceRows = await repos.service.listByProject(id);
+  const serviceCount = serviceRows.length;
 
   // Build the "options" object the dashboard expects for build settings
   const options = {
@@ -1216,38 +1239,14 @@ export async function getInfo(c: Context) {
   };
 
   // Fetch domains for this project
-  const rawDomains = await repos.domain.listByProject(id);
+  const rawDomains = await listProjectRouteRows(id);
+  const routeState = await resolveProjectRouteState(project, { projectDomains: rawDomains });
+  const publicEndpoints = routeState.publicEndpoints;
   let domains: Array<Domain & { domain: string; primary: boolean }> = rawDomains.map((d) => ({
     ...d,
     domain: d.hostname,
     primary: d.isPrimary,
   }));
-
-  if (domains.length === 0) {
-    const trafficSource = await resolveProjectTrafficSource(id);
-    if (trafficSource?.kind === "cloud") {
-      domains = [
-        {
-          id: `managed:${id}`,
-          projectId: id,
-          serviceId: null,
-          hostname: trafficSource.domain,
-          domain: trafficSource.domain,
-          isPrimary: true,
-          primary: true,
-          status: "active",
-          verificationToken: null,
-          verified: true,
-          verifiedAt: new Date(),
-          sslStatus: "active",
-          sslIssuer: "oblien",
-          sslExpiresAt: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      ];
-    }
-  }
 
   const verifiedPrimaryDomain =
     rawDomains.find((domain) => domain.isPrimary && domain.verified)?.hostname ??
@@ -1260,7 +1259,14 @@ export async function getInfo(c: Context) {
   return c.json({
     success: true,
     data: {
-      project: { ...project, options, domains },
+      project: {
+        ...project,
+        publicEndpoints,
+        options,
+        domains,
+        serviceCount,
+        hasMultipleServices: serviceCount > 1,
+      },
       environments,
     },
   });

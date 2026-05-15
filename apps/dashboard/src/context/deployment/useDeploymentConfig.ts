@@ -8,7 +8,12 @@ import { settingsApi } from "@/lib/api/settings";
 import type { BuildMode } from "@/lib/api/settings";
 import { STACKS, type StackDefinition } from "@repo/core";
 import type { BuildStrategy, DeploymentConfig } from "./types";
-import { DEFAULT_CONFIG } from "./types";
+import {
+  DEFAULT_CONFIG,
+  createPublicEndpoint,
+  ensurePublicEndpoints,
+  syncPublicEndpointState,
+} from "./types";
 import { normalizeSubdomain } from "@/utils/subdomain";
 
 function envMapToRows(env?: Record<string, string>): DeploymentConfig["envVars"] {
@@ -17,6 +22,23 @@ function envMapToRows(env?: Record<string, string>): DeploymentConfig["envVars"]
     value,
     visible: false,
   }));
+}
+
+function hasSavedProjectPort(project: Record<string, any> | null) {
+  if (!project) return false;
+
+  if (typeof project.port === "number") return true;
+
+  if (typeof project.options?.productionPort === "string" && project.options.productionPort.trim()) {
+    return true;
+  }
+
+  return Array.isArray(project.publicEndpoints)
+    ? project.publicEndpoints.some((endpoint: any) => {
+        if (endpoint?.port === undefined || endpoint?.port === null) return false;
+        return String(endpoint.port).trim().length > 0;
+      })
+    : false;
 }
 
 /**
@@ -41,11 +63,17 @@ export function useDeploymentConfig() {
   }, []);
 
   const updateConfig = useCallback((updates: Partial<DeploymentConfig>) => {
-    setConfig((prev) => ({ ...prev, ...updates }));
+    setConfig((prev) => {
+      const next = { ...prev, ...updates };
+      return syncPublicEndpointState(next);
+    });
   }, []);
 
   const updateOptions = useCallback((updates: Partial<DeploymentConfig["options"]>) => {
-    setConfig((prev) => ({ ...prev, options: { ...prev.options, ...updates } }));
+    setConfig((prev) => {
+      const next = { ...prev, options: { ...prev.options, ...updates } };
+      return syncPublicEndpointState(next);
+    });
   }, []);
 
   /** Resolve initial buildStrategy: user global pref > stack default > "server" */
@@ -132,19 +160,50 @@ export function useDeploymentConfig() {
             ? [selectedBranch, ...branches]
             : branches;
         const projectType = response.projectType || "app";
+        const serviceDeploymentMode = projectType === "services" ? "services" : "single";
         const detectedStack = (response.stack || "nextjs") as FrameworkId;
         const stackDef = STACKS[detectedStack as keyof typeof STACKS] as StackDefinition | undefined;
         const hasServer = !!response.startCommand;
         const hasBuild = !!response.buildCommand;
+        const effectiveHasServer = project?.hasServer ?? hasServer;
+        const primaryDomain = project?.slug || normalizeSubdomain(repoName);
+        const primaryPort = String(project?.port ?? response.port ?? "");
+        const hasStoredPort = hasSavedProjectPort(project);
+        const publicEndpoints = ensurePublicEndpoints(
+          project?.publicEndpoints?.map((endpoint: {
+            port?: number;
+            targetPath?: string;
+            domain?: string;
+            customDomain?: string;
+            domainType?: "free" | "custom";
+          }) => createPublicEndpoint({
+            port: endpoint.port ? String(endpoint.port) : "",
+            targetPath: endpoint.targetPath || "",
+            domain: endpoint.domain || "",
+            customDomain: endpoint.customDomain || "",
+            domainType: endpoint.domainType || "free",
+          })),
+          effectiveHasServer
+            ? {
+                port: primaryPort,
+                domain: primaryDomain,
+                domainType: "free",
+              }
+            : {
+                targetPath: "/",
+                domain: primaryDomain,
+                domainType: "free",
+              },
+        );
 
-        setConfig((prev) => ({
+        setConfig((prev) => syncPublicEndpointState({
           ...prev,
           projectId: context?.projectId,
           repo: repoName,
           owner: response.repository.owner?.login || sourceOwner,
           projectName: project?.name || repoName,
           projectType,
-          domain: project?.slug || normalizeSubdomain(repoName),
+          serviceDeploymentMode,
           framework: detectedStack,
           detectedFramework: detectedStack,
           buildStrategy: normalizeBuildStrategy(projectType, stackDef),
@@ -154,7 +213,10 @@ export function useDeploymentConfig() {
           branch: selectedBranch,
           branches: branchOptions,
           services: response.services || [],
+          publicEndpoints,
           rootEnvVars: envMapToRows(response.rootEnv),
+          productionPortTouched: hasStoredPort,
+          lastAutoDetectedEnvPort: null,
           options: {
             buildCommand: project?.buildCommand ?? response.buildCommand ?? "",
             installCommand: project?.installCommand ?? response.installCommand ?? "",
@@ -163,9 +225,9 @@ export function useDeploymentConfig() {
               ? response.productionPaths.join(", ")
               : response.productionPaths || ""),
             startCommand: project?.startCommand ?? response.startCommand ?? "",
-            productionPort: String(project?.port ?? response.port ?? 3000),
-            rootDirectory: project?.rootDirectory || "./",
-            hasServer: project?.hasServer ?? hasServer,
+            productionPort: primaryPort,
+            rootDirectory: project?.rootDirectory || response.rootDirectory || "./",
+            hasServer: effectiveHasServer,
             hasBuild: project?.hasBuild ?? hasBuild,
           },
         }));
@@ -206,12 +268,43 @@ export function useDeploymentConfig() {
 
         const name = response.repository.name || path.split("/").pop() || "project";
         const projectType = response.projectType || "app";
+        const serviceDeploymentMode = projectType === "services" ? "services" : "single";
         const detectedStack = (response.stack || "nextjs") as FrameworkId;
         const stackDef = STACKS[detectedStack as keyof typeof STACKS] as StackDefinition | undefined;
         const hasServer = !!response.startCommand;
         const hasBuild = !!response.buildCommand;
+        const effectiveHasServer = project?.hasServer ?? hasServer;
+        const primaryDomain = project?.slug || normalizeSubdomain(name);
+        const primaryPort = String(project?.port ?? response.port ?? "");
+        const hasStoredPort = hasSavedProjectPort(project);
+        const publicEndpoints = ensurePublicEndpoints(
+          project?.publicEndpoints?.map((endpoint: {
+            port?: number;
+            targetPath?: string;
+            domain?: string;
+            customDomain?: string;
+            domainType?: "free" | "custom";
+          }) => createPublicEndpoint({
+            port: endpoint.port ? String(endpoint.port) : "",
+            targetPath: endpoint.targetPath || "",
+            domain: endpoint.domain || "",
+            customDomain: endpoint.customDomain || "",
+            domainType: endpoint.domainType || "free",
+          })),
+          effectiveHasServer
+            ? {
+                port: primaryPort,
+                domain: primaryDomain,
+                domainType: "free",
+              }
+            : {
+                targetPath: "/",
+                domain: primaryDomain,
+                domainType: "free",
+              },
+        );
 
-        setConfig((prev) => ({
+        setConfig((prev) => syncPublicEndpointState({
           ...prev,
           projectId: context?.projectId,
           repo: name,
@@ -219,7 +312,7 @@ export function useDeploymentConfig() {
           localPath: path,
           projectName: project?.name || name,
           projectType,
-          domain: project?.slug || normalizeSubdomain(name),
+          serviceDeploymentMode,
           framework: detectedStack,
           detectedFramework: detectedStack,
           buildStrategy: normalizeBuildStrategy(projectType, stackDef),
@@ -229,7 +322,10 @@ export function useDeploymentConfig() {
           branch: project?.gitBranch || response.repository.default_branch || "main",
           branches: [],
           services: response.services || [],
+          publicEndpoints,
           rootEnvVars: envMapToRows(response.rootEnv),
+          productionPortTouched: hasStoredPort,
+          lastAutoDetectedEnvPort: null,
           options: {
             buildCommand: project?.buildCommand ?? response.buildCommand ?? "",
             installCommand: project?.installCommand ?? response.installCommand ?? "",
@@ -238,9 +334,9 @@ export function useDeploymentConfig() {
               ? response.productionPaths.join(", ")
               : response.productionPaths || ""),
             startCommand: project?.startCommand ?? response.startCommand ?? "",
-            productionPort: String(project?.port ?? response.port ?? 3000),
-            rootDirectory: project?.rootDirectory || path,
-            hasServer: project?.hasServer ?? hasServer,
+            productionPort: primaryPort,
+            rootDirectory: project?.rootDirectory || response.rootDirectory || "./",
+            hasServer: effectiveHasServer,
             hasBuild: project?.hasBuild ?? hasBuild,
           },
         }));

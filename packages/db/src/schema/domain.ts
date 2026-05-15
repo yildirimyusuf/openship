@@ -3,6 +3,7 @@ import {
   text,
   timestamp,
   boolean,
+  integer,
 } from "drizzle-orm/pg-core";
 import { project } from "./project";
 
@@ -23,6 +24,12 @@ export const domain = pgTable("domain", {
 
   /** The custom domain (e.g. "app.example.com") */
   hostname: text("hostname").notNull().unique(),
+  /** Internal target port this hostname should route to */
+  targetPort: integer("target_port"),
+  /** Static output subpath this hostname should serve */
+  targetPath: text("target_path"),
+  /** Route kind: managed/free subdomain or custom domain */
+  domainType: text("domain_type"),
   /** Is this the primary domain for the project? */
   isPrimary: boolean("is_primary").notNull().default(false),
 

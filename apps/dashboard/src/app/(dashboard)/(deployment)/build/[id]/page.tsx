@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useCallback, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useDeployment } from "@/context/DeploymentContext";
+import { usesServiceDeployment } from "@/context/deployment/types";
 import DeploymentProcessing from "@/components/import-project/DeploymentProcessing";
 import ComposeDeploymentProcessing from "@/components/import-project/ComposeDeploymentProcessing";
 import BuildSkeleton from "@/components/import-project/BuildSkeleton";
@@ -198,7 +199,7 @@ const BuildPage: React.FC = () => {
     return <BuildSkeleton />;
   }
 
-  if (config.projectType === "services") {
+  if (usesServiceDeployment(config)) {
     return <ComposeDeploymentProcessing onRedeploy={handleRedeploy} />;
   }
 

@@ -13,7 +13,16 @@ export { executeComposePipeline, type ComposePipelineOpts } from "./pipeline";
 export { buildComposeImages, type ComposeBuildImagesResult } from "./build.service";
 
 // Deploy phase
-export { deployComposeServices, isComposeProject, type ComposeDeployResult } from "./deploy.service";
+export { deployComposeServices, type ComposeDeployResult } from "./deploy.service";
+
+// Project service-shape helpers
+export {
+  isLegacyComposeProject,
+  listProjectServices,
+  projectServicesToComposeServices,
+  resolveProjectServicePreflightServices,
+  shouldUseProjectServicePipeline,
+} from "./project-services";
 
 // Shared helpers
 export { normalizeSubdomain, defaultServiceSubdomain, parseServicePort } from "./domain-helpers";

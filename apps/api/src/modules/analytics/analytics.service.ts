@@ -18,7 +18,10 @@ import { repos } from "@repo/db";
 import { NotFoundError } from "@repo/core";
 import type { ResourceUsage } from "@repo/adapters";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
-import { resolveProjectTrafficSource, fetchMgmt } from "../../lib/project-analytics";
+import {
+  resolveProjectTrafficSources,
+  fetchMgmt,
+} from "../../lib/project-analytics";
 import { getAdminOblienClient } from "../../lib/oblien-user-client";
 import { cloudAnalyticsProxy } from "../../lib/cloud-client";
 
@@ -193,7 +196,17 @@ function buildCloudHourlyPeriods(
   const byHour = new Map<number, CloudAnalyticsBucket>();
 
   for (const bucket of buckets) {
-    byHour.set(bucket.timestamp, bucket);
+    const current = byHour.get(bucket.timestamp);
+    if (!current) {
+      byHour.set(bucket.timestamp, { ...bucket });
+      continue;
+    }
+
+    current.requests += bucket.requests;
+    current.bandwidth_in += bucket.bandwidth_in;
+    current.bandwidth_out += bucket.bandwidth_out;
+    current.response_time_sum += bucket.response_time_sum;
+    current.unique_visitors += bucket.unique_visitors;
   }
 
   const periods: AnalyticsPeriod[] = [];
@@ -307,42 +320,44 @@ export async function getAnalyticsSummary(
     throw new NotFoundError("Project", projectId);
   }
 
-  const source = await resolveProjectTrafficSource(projectId);
-  if (!source) {
+  const sources = await resolveProjectTrafficSources(projectId);
+  if (sources.length === 0) {
     return EMPTY_SUMMARY;
   }
 
-  if (source.kind === "cloud") {
+  if (sources.every((source) => source.kind === "cloud")) {
     const toMs = Date.now();
     const fromMs = toMs - 24 * 60 * 60 * 1000;
     const params = { from: fromMs, to: toMs, interval: "hour" as const };
-    const response = await fetchCloudTimeseries(userId, source.domain, params).catch(() => null);
+    const responses = await Promise.all(
+      sources.map((source) => fetchCloudTimeseries(userId, source.domain, params).catch(() => null)),
+    );
+    const buckets = responses.flatMap((response) => response?.data ?? []);
 
-    if (!response?.data?.length) return EMPTY_SUMMARY;
+    if (buckets.length === 0) return EMPTY_SUMMARY;
 
-    return summariseCloudBuckets(response.data, new Date(response.meta?.to ?? toMs).toISOString());
+    return summariseCloudBuckets(buckets, new Date(toMs).toISOString());
   }
 
-  const { domain, serverId } = source;
   const now = Math.floor(Date.now() / 60_000);
+  const selfHostedSources = sources.filter((source) => source.kind === "self-hosted");
+  const bucketSets = await Promise.all(
+    selfHostedSources.map(async ({ domain, serverId }) => {
+      // DB: flushed archive (last 24h of persisted data)
+      const dbBuckets = await repos.analytics.recentBuckets({ serverId, domain, limit: 1440 });
 
-  // DB: flushed archive (last 24h of persisted data)
-  const dbBuckets = await repos.analytics.recentBuckets({ serverId, domain, limit: 1440 });
-
-  // Live OpenResty: unflushed tail (since last scraper flush)
-  // The scraper flushes up to `now - 1` so live always has at least the current minute
-  const lastFlushed = dbBuckets.length > 0 ? dbBuckets[0]!.minute : now - 1440;
-  const liveBuckets = await fetchLiveBuckets(serverId, domain, lastFlushed + 1, now);
-
-  // Combine both sources
-  const allBuckets: MgmtAnalyticsBucket[] = [...dbBuckets.map(toMgmtBucket), ...liveBuckets];
+      // Live OpenResty: unflushed tail (since last scraper flush)
+      // The scraper flushes up to `now - 1` so live always has at least the current minute
+      const lastFlushed = dbBuckets.length > 0 ? dbBuckets[0]!.minute : now - 1440;
+      const liveBuckets = await fetchLiveBuckets(serverId, domain, lastFlushed + 1, now);
+      return [...dbBuckets.map(toMgmtBucket), ...liveBuckets];
+    }),
+  );
+  const allBuckets: MgmtAnalyticsBucket[] = bucketSets.flat();
 
   if (allBuckets.length === 0) return EMPTY_SUMMARY;
 
-  const lastUpdated =
-    liveBuckets.length > 0 ? new Date().toISOString() : dbBuckets[0]!.createdAt.toISOString();
-
-  return summariseBuckets(allBuckets, lastUpdated);
+  return summariseBuckets(allBuckets, new Date().toISOString());
 }
 
 // ─── Analytics periods ───────────────────────────────────────────────────────
@@ -365,38 +380,42 @@ export async function getAnalyticsPeriods(
     throw new NotFoundError("Project", projectId);
   }
 
-  const source = await resolveProjectTrafficSource(projectId);
-  if (!source) return [];
+  const sources = await resolveProjectTrafficSources(projectId);
+  if (sources.length === 0) return [];
 
-  if (source.kind === "cloud") {
+  if (sources.every((source) => source.kind === "cloud")) {
     const toMs = to ? new Date(to).getTime() : Date.now();
     const fromMs = from ? new Date(from).getTime() : toMs - 24 * 60 * 60 * 1000;
     const params = { from: fromMs, to: toMs, interval: "hour" as const };
-    const response = await fetchCloudTimeseries(userId, source.domain, params).catch(() => null);
+    const responses = await Promise.all(
+      sources.map((source) => fetchCloudTimeseries(userId, source.domain, params).catch(() => null)),
+    );
+    const buckets = responses.flatMap((response) => response?.data ?? []);
 
-    if (!response?.data?.length) return [];
+    if (buckets.length === 0) return [];
 
-    return buildCloudHourlyPeriods(response.data, fromMs, toMs);
+    return buildCloudHourlyPeriods(buckets, fromMs, toMs);
   }
-
-  const { domain, serverId } = source;
 
   const now = Math.floor(Date.now() / 60_000);
   const fromMinute = from ? Math.floor(new Date(from).getTime() / 60_000) : now - 1440;
   const toMinute = to ? Math.floor(new Date(to).getTime() / 60_000) : now;
+  const selfHostedSources = sources.filter((source) => source.kind === "self-hosted");
+  const bucketSets = await Promise.all(
+    selfHostedSources.map(async ({ domain, serverId }) => {
+      // DB: flushed archive for the requested range
+      const dbBuckets = await repos.analytics.queryBuckets({ serverId, domain, fromMinute, toMinute });
 
-  // DB: flushed archive for the requested range
-  const dbBuckets = await repos.analytics.queryBuckets({ serverId, domain, fromMinute, toMinute });
-
-  // Live OpenResty: unflushed tail (starts after last DB minute)
-  const lastDbMinute =
-    dbBuckets.length > 0 ? Math.max(...dbBuckets.map((b) => b.minute)) : fromMinute - 1;
-  const liveFrom = Math.max(lastDbMinute + 1, fromMinute);
-  const liveBuckets =
-    liveFrom <= toMinute ? await fetchLiveBuckets(serverId, domain, liveFrom, toMinute) : [];
-
-  // Combine both sources
-  const allBuckets: MgmtAnalyticsBucket[] = [...dbBuckets.map(toMgmtBucket), ...liveBuckets];
+      // Live OpenResty: unflushed tail (starts after last DB minute)
+      const lastDbMinute =
+        dbBuckets.length > 0 ? Math.max(...dbBuckets.map((b) => b.minute)) : fromMinute - 1;
+      const liveFrom = Math.max(lastDbMinute + 1, fromMinute);
+      const liveBuckets =
+        liveFrom <= toMinute ? await fetchLiveBuckets(serverId, domain, liveFrom, toMinute) : [];
+      return [...dbBuckets.map(toMgmtBucket), ...liveBuckets];
+    }),
+  );
+  const allBuckets: MgmtAnalyticsBucket[] = bucketSets.flat();
 
   if (allBuckets.length === 0) return [];
 

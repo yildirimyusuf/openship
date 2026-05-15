@@ -37,7 +37,7 @@ export type { BuildMode, UserSettingsResponse } from "./settings";
 export { cloudApi } from "./cloud";
 export type { CloudStatus } from "./cloud";
 export { servicesApi } from "./services";
-export type { Service, ServiceContainer, ServiceEnvVar } from "./services";
+export type { Service, ServiceContainer, ServiceEnvVar, ServiceInput } from "./services";
 export { mailApi } from "./mail";
 export type {
   MailSetupStep,

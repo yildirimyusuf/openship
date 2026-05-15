@@ -17,7 +17,9 @@
 
 import crypto from "crypto";
 import { repos } from "@repo/db";
+import { APIError } from "better-auth/api";
 import { env } from "../../config/env";
+import { auth } from "../../lib/auth";
 import { TtlCache } from "../../lib/cache";
 import { getLocalGhToken } from "./github.local-auth";
 import type { GitHubInstallation, MappedAccount } from "./github.types";
@@ -173,8 +175,22 @@ export async function getInstallationToken(
  * Used for user-scoped operations (listing their orgs, etc.).
  */
 export async function getUserToken(userId: string): Promise<string | null> {
-  const account = await repos.account.findByProvider(userId, "github");
-  return account?.accessToken ?? null;
+  try {
+    const tokens = await auth.api.getAccessToken({
+      body: {
+        providerId: "github",
+        userId,
+      },
+    });
+
+    return tokens.accessToken ?? null;
+  } catch (error) {
+    if (error instanceof APIError) {
+      return null;
+    }
+
+    throw error;
+  }
 }
 
 // ─── Unified token resolver ──────────────────────────────────────────────────

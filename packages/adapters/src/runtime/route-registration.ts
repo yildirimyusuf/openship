@@ -1,4 +1,5 @@
 import { DeployError } from "@repo/core";
+import { posix as pathPosix } from "node:path";
 
 import type { RouteConfig } from "../types";
 import type { BuildLogger } from "./build-pipeline";
@@ -8,6 +9,8 @@ export interface RoutedDomainInput {
   hostname: string;
   tls: boolean;
   provisionSsl?: boolean;
+  targetPort?: number;
+  targetPath?: string;
 }
 
 export interface RouteRegistrationOptions {
@@ -23,6 +26,7 @@ export async function registerResolvedRoutes(
   ssl: DeploySsl | undefined,
   domains: RoutedDomainInput[],
   routeTarget: Omit<RouteConfig, "domain" | "tls"> | null,
+  routeTargetsByPort?: Map<number, Omit<RouteConfig, "domain" | "tls">>,
   options?: RouteRegistrationOptions,
 ): Promise<void> {
   if (!routing || domains.length === 0) {
@@ -40,13 +44,34 @@ export async function registerResolvedRoutes(
     logger.log(`Registering route for ${domain.hostname}...\n`);
 
     let routeConfig: RouteConfig;
-    const targetUrl = (routeTarget as { targetUrl?: string }).targetUrl;
-    const staticRoot = (routeTarget as { staticRoot?: string }).staticRoot;
+    const hasPortTarget = domain.targetPort !== undefined;
+    const hasPathTarget = typeof domain.targetPath === "string";
 
-    if (typeof targetUrl === "string") {
+    if (hasPortTarget === hasPathTarget) {
+      throw new DeployError(
+        `Route ${domain.hostname} must target exactly one destination`,
+        "INVALID_ROUTE_TARGET",
+      );
+    }
+
+    const resolvedRouteTarget =
+      domain.targetPort !== undefined
+        ? routeTargetsByPort?.get(domain.targetPort) ?? routeTarget
+        : routeTarget;
+    const targetUrl = (resolvedRouteTarget as { targetUrl?: string }).targetUrl;
+    const staticRoot = (resolvedRouteTarget as { staticRoot?: string }).staticRoot;
+
+    if (hasPortTarget && typeof targetUrl === "string") {
       routeConfig = { domain: domain.hostname, tls: domain.tls, targetUrl };
-    } else if (typeof staticRoot === "string") {
-      routeConfig = { domain: domain.hostname, tls: domain.tls, staticRoot };
+    } else if (hasPathTarget && typeof staticRoot === "string") {
+      const targetPath = domain.targetPath!;
+      routeConfig = {
+        domain: domain.hostname,
+        tls: domain.tls,
+        staticRoot: targetPath === "/"
+          ? staticRoot
+          : pathPosix.join(staticRoot, targetPath.slice(1)),
+      };
     } else {
       throw new DeployError("Resolved route target is invalid", "INVALID_ROUTE_TARGET");
     }

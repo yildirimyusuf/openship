@@ -1,6 +1,7 @@
 import React from "react";
 import { Terminal, FolderOutput, Server, Globe, Container, Layers, Hash, Cloud, Monitor } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
+import { getPublicEndpointHosts, usesServiceDeployment } from "@/context/deployment/types";
 import { usePlatform } from "@/context/PlatformContext";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { STACKS, STACK_ICONS } from "@repo/core";
@@ -8,9 +9,9 @@ import { STACKS, STACK_ICONS } from "@repo/core";
 const BuildSummary: React.FC = () => {
   const { config } = useDeployment();
   const { baseDomain } = usePlatform();
-  const isApp = config.projectType === "app";
+  const isServices = usesServiceDeployment(config);
+  const isApp = config.projectType === "app" || (config.projectType === "services" && !isServices);
   const isDocker = config.projectType === "docker";
-  const isServices = config.projectType === "services";
 
   const fw = isApp ? getFrameworkConfig(config.framework) : null;
   const stackDef = STACKS[config.framework as keyof typeof STACKS];
@@ -56,12 +57,11 @@ const BuildSummary: React.FC = () => {
   ].filter(Boolean) as Array<{ label: string; value: string; icon: React.ReactNode }>;
 
   // For app/docker: single domain display
-  const domainDisplay =
-    !isServices && (config.domainType === "custom" && config.customDomain
-      ? config.customDomain
-      : config.domain
-          ? `${config.domain}.${baseDomain}`
-          : null);
+  const endpointHosts = !isServices
+    ? getPublicEndpointHosts(config.publicEndpoints, baseDomain, config.projectName)
+    : [];
+  const domainDisplay = endpointHosts[0] ?? null;
+  const extraEndpointCount = endpointHosts.length > 1 ? endpointHosts.length - 1 : 0;
   return (
     <div className="p-4 rounded-xl bg-gradient-to-br from-primary/5 via-primary/3 to-transparent border border-primary/10 space-y-3">
       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -78,6 +78,7 @@ const BuildSummary: React.FC = () => {
               <p className="text-xs text-muted-foreground">Domain</p>
               <p className="text-sm font-medium text-foreground truncate">
                 {domainDisplay}
+                {extraEndpointCount > 0 ? ` +${extraEndpointCount} more` : ""}
               </p>
             </div>
           </div>

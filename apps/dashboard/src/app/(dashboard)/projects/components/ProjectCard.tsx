@@ -4,7 +4,6 @@ import { ArrowRight, GitBranch, Globe, Server, FolderOpen, Cloud, HardDrive } fr
 import { type Project } from "@/constants/mock";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { getProjectStatus, PROJECT_STATUS_META } from "@/utils/project-status";
-import { getProjectType } from "@repo/core";
 import { usePlatform } from "@/context/PlatformContext";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
@@ -21,10 +20,14 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
-function getHostingLabel(deployTarget?: string | null, serverName?: string | null): { icon: React.ReactNode; label: string } | null {
+function getHostingLabel(
+  deployTarget?: string | null,
+  serverName?: string | null,
+): { icon: React.ReactNode; label: string } | null {
   if (!deployTarget) return null;
   if (deployTarget === "cloud") return { icon: <Cloud className="size-3.5" />, label: "Cloud" };
-  if (deployTarget === "server") return { icon: <Server className="size-3.5" />, label: serverName || "Server" };
+  if (deployTarget === "server")
+    return { icon: <Server className="size-3.5" />, label: serverName || "Server" };
   if (deployTarget === "local") return { icon: <HardDrive className="size-3.5" />, label: "Local" };
   return null;
 }
@@ -46,14 +49,10 @@ const ProjectCard: React.FC<Props> = ({ project }) => {
   const isLocal = !!project.localPath;
   const hasRepo = !!(project.gitOwner && project.gitRepo);
   const repoSlug = hasRepo ? `${project.gitOwner}/${project.gitRepo}` : null;
-  const domain = (project as any).primaryDomain || (project.slug ? `${project.slug}.${baseDomain}` : null);
-  const isServicesProject = (() => {
-    try {
-      return getProjectType(project.framework as any) === "services";
-    } catch {
-      return false;
-    }
-  })();
+  const domain =
+    (project as any).primaryDomain || (project.slug ? `${project.slug}.${baseDomain}` : null);
+  const hasMultipleServices =
+    project.hasMultipleServices === true || Number(project.serviceCount ?? 0) > 1;
 
   const hosting = getHostingLabel(project.deployTarget, project.serverName);
   const hasFavicon = !!project.favicon && !faviconError;
@@ -81,9 +80,7 @@ const ProjectCard: React.FC<Props> = ({ project }) => {
       {/* Name + domain */}
       <div className="min-w-0 flex-shrink-0 w-44 lg:w-56">
         <p className="text-sm font-medium text-foreground truncate">{project.name}</p>
-        {domain && (
-          <p className="text-xs text-muted-foreground truncate mt-0.5">{domain}</p>
-        )}
+        {domain && <p className="text-xs text-muted-foreground truncate mt-0.5">{domain}</p>}
       </div>
 
       {/* Meta badges */}
@@ -115,7 +112,7 @@ const ProjectCard: React.FC<Props> = ({ project }) => {
         ) : null}
 
         {/* Build target */}
-        {isServicesProject ? (
+        {hasMultipleServices ? (
           <span className="hidden lg:inline-flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
             <Server className="size-3.5" />
             Services

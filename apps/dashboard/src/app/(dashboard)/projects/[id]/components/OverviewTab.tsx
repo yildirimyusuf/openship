@@ -1,8 +1,7 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
-import { servicesApi, type Service } from "@/lib/api/services";
 import {
   ExternalLink,
   GitBranch,
@@ -18,52 +17,41 @@ import {
 } from "lucide-react";
 
 export const OverviewTab = () => {
-  const { projectData, gitData, buildData, analyticsData, isLoadingAnalytics, setActiveTab, id } = useProjectSettings();
-
-  const [services, setServices] = useState<Service[]>([]);
-
-  useEffect(() => {
-    const projectId = projectData.id || id;
-    if (!projectId || projectId === "undefined") {
-      setServices([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    servicesApi.list(projectId)
-      .then((res) => {
-        if (!cancelled && res.success) setServices(res.services ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setServices([]);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [id, projectData.id]);
+  const {
+    projectData,
+    gitData,
+    buildData,
+    analyticsData,
+    isLoadingAnalytics,
+    setActiveTab,
+    id,
+    servicesData,
+  } = useProjectSettings();
+  const services = servicesData.services;
+  const serviceCount = servicesData.isLoading
+    ? (projectData.serviceCount ?? services.length)
+    : services.length;
 
   // deployTarget comes from API (active deployment's meta), not from global dashboard mode
   const deployTarget = projectData.deployTarget as string | null;
-  const platformLabel = deployTarget === "cloud"
-    ? "Openship Cloud"
-    : deployTarget === "server"
-      ? "Self-hosted (Server)"
-      : deployTarget === "local"
-        ? "Self-hosted (Local)"
-        : "—";
+  const platformLabel =
+    deployTarget === "cloud"
+      ? "Openship Cloud"
+      : deployTarget === "server"
+        ? "Self-hosted (Server)"
+        : deployTarget === "local"
+          ? "Self-hosted (Local)"
+          : "—";
   const hasGit = !!(projectData.gitOwner && projectData.gitRepo);
   const isStaticRuntime =
     projectData.hasServer === false ||
     projectData.options?.hasServer === false ||
     projectData.productionMode === "static";
-  const modeLabel =
-    isStaticRuntime
-      ? "Static Site"
-      : projectData.productionMode === "standalone"
-        ? "Standalone"
-        : "Server";
+  const modeLabel = isStaticRuntime
+    ? "Static Site"
+    : projectData.productionMode === "standalone"
+      ? "Standalone"
+      : "Server";
 
   const formatNumber = (num: number): string => {
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
@@ -132,13 +120,12 @@ export const OverviewTab = () => {
     ? `${new Date(analyticsData.summary.firstRequest).toLocaleDateString()} – ${new Date(analyticsData.summary.lastRequest).toLocaleDateString()}`
     : undefined;
 
-  const displayData = trafficData.length > 0
-    ? trafficData
-    : Array.from({ length: 24 }, (_, i) => ({ hour: i, requests: 0 }));
+  const displayData =
+    trafficData.length > 0
+      ? trafficData
+      : Array.from({ length: 24 }, (_, i) => ({ hour: i, requests: 0 }));
   const maxRequests = Math.max(...displayData.map((d) => d.requests), 1);
-  const areaData = displayData.length === 1
-    ? [displayData[0], displayData[0]]
-    : displayData;
+  const areaData = displayData.length === 1 ? [displayData[0], displayData[0]] : displayData;
 
   return (
     <div className="space-y-5">
@@ -200,9 +187,7 @@ export const OverviewTab = () => {
             <BarChart3 className="size-3.5 text-primary" />
             <span className="text-[13px] font-semibold text-foreground">Traffic</span>
           </div>
-          {dateRange && (
-            <span className="text-[11px] text-muted-foreground">{dateRange}</span>
-          )}
+          {dateRange && <span className="text-[11px] text-muted-foreground">{dateRange}</span>}
         </div>
         {isLoadingAnalytics ? (
           <div className="flex items-center justify-center h-[120px]">
@@ -228,19 +213,23 @@ export const OverviewTab = () => {
                   </linearGradient>
                 </defs>
                 <path
-                  d={`M 0 200 ${areaData.map((d, i) => {
-                    const x = areaData.length === 1 ? 500 : (i / (areaData.length - 1)) * 1000;
-                    const y = 200 - (d.requests / maxRequests) * 180;
-                    return `L ${x} ${y}`;
-                  }).join(" ")} L 1000 200 Z`}
+                  d={`M 0 200 ${areaData
+                    .map((d, i) => {
+                      const x = areaData.length === 1 ? 500 : (i / (areaData.length - 1)) * 1000;
+                      const y = 200 - (d.requests / maxRequests) * 180;
+                      return `L ${x} ${y}`;
+                    })
+                    .join(" ")} L 1000 200 Z`}
                   fill="url(#overviewAreaGrad)"
                 />
                 <path
-                  d={areaData.map((d, i) => {
-                    const x = areaData.length === 1 ? 500 : (i / (areaData.length - 1)) * 1000;
-                    const y = 200 - (d.requests / maxRequests) * 180;
-                    return `${i === 0 ? "M" : "L"} ${x} ${y}`;
-                  }).join(" ")}
+                  d={areaData
+                    .map((d, i) => {
+                      const x = areaData.length === 1 ? 500 : (i / (areaData.length - 1)) * 1000;
+                      const y = 200 - (d.requests / maxRequests) * 180;
+                      return `${i === 0 ? "M" : "L"} ${x} ${y}`;
+                    })
+                    .join(" ")}
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="2"
@@ -248,9 +237,11 @@ export const OverviewTab = () => {
               </svg>
             </div>
             <div className="flex items-center justify-between mt-1 text-[9px] text-muted-foreground">
-              {displayData.filter((_, i) => i % 6 === 0).map((d, i) => (
-                <span key={i}>{d.hour}:00</span>
-              ))}
+              {displayData
+                .filter((_, i) => i % 6 === 0)
+                .map((d, i) => (
+                  <span key={i}>{d.hour}:00</span>
+                ))}
             </div>
           </div>
         )}
@@ -271,9 +262,9 @@ export const OverviewTab = () => {
             <Layers className="size-3.5 text-emerald-500" />
           </div>
           <span className="text-[13px] font-medium text-foreground">Services</span>
-          {services.length > 0 && (
+          {serviceCount > 0 && (
             <span className="text-[11px] font-semibold text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded-md">
-              {services.length}
+              {serviceCount}
             </span>
           )}
           {services.length > 0 && (
@@ -288,11 +279,13 @@ export const OverviewTab = () => {
                 </div>
               ))}
               {services.length > 4 && (
-                <span className="text-[10px] text-muted-foreground/60 ml-0.5">+{services.length - 4}</span>
+                <span className="text-[10px] text-muted-foreground/60 ml-0.5">
+                  +{services.length - 4}
+                </span>
               )}
             </div>
           )}
-          {services.length === 0 && (
+          {serviceCount === 0 && (
             <span className="text-[11px] text-muted-foreground/50">No services connected</span>
           )}
         </div>
@@ -312,12 +305,21 @@ export const OverviewTab = () => {
           <div className="space-y-2">
             {topPaths.slice(0, 5).map((p, idx) => (
               <div key={idx} className="flex items-center gap-3">
-                <span className="text-[12px] text-muted-foreground font-medium truncate flex-1 min-w-0">{p.path}</span>
-                <span className="text-[11px] font-medium text-primary shrink-0">{p.percentage}%</span>
+                <span className="text-[12px] text-muted-foreground font-medium truncate flex-1 min-w-0">
+                  {p.path}
+                </span>
+                <span className="text-[11px] font-medium text-primary shrink-0">
+                  {p.percentage}%
+                </span>
                 <div className="w-20 bg-muted/50 rounded-full h-1.5 shrink-0 overflow-hidden">
-                  <div className="h-full bg-primary rounded-full" style={{ width: `${p.percentage}%` }} />
+                  <div
+                    className="h-full bg-primary rounded-full"
+                    style={{ width: `${p.percentage}%` }}
+                  />
                 </div>
-                <span className="text-[10px] text-muted-foreground/60 shrink-0 w-14 text-right">{p.count} req</span>
+                <span className="text-[10px] text-muted-foreground/60 shrink-0 w-14 text-right">
+                  {p.count} req
+                </span>
               </div>
             ))}
           </div>
@@ -365,7 +367,9 @@ function Item({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-4">
       <span className="text-[13px] text-muted-foreground">{label}</span>
-      <span className="text-[13px] font-medium text-foreground truncate max-w-[200px]">{value}</span>
+      <span className="text-[13px] font-medium text-foreground truncate max-w-[200px]">
+        {value}
+      </span>
     </div>
   );
 }
@@ -381,7 +385,9 @@ function StatusItem({ label, active }: { label: string; active: boolean }) {
             : "bg-muted/60 text-muted-foreground/60"
         }`}
       >
-        <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
+        <span
+          className={`w-1.5 h-1.5 rounded-full ${active ? "bg-emerald-500" : "bg-muted-foreground/30"}`}
+        />
         {active ? "Active" : "Off"}
       </span>
     </div>

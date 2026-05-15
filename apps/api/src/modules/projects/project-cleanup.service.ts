@@ -17,7 +17,6 @@ import { NotFoundError } from "@repo/core";
 import { platform } from "../../lib/controller-helpers";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { buildServiceRouteDomain } from "../../lib/routing-domains";
-import { isComposeProject } from "../deployments/compose";
 
 // ─── Resource Manifest ───────────────────────────────────────────────────────
 
@@ -50,8 +49,19 @@ export interface CleanupResult {
  */
 export async function collectProjectManifest(project: Project): Promise<CleanupManifest> {
   const resources: CleanupResource[] = [];
-  const { routing } = platform();
-  const isCompose = isComposeProject(project);
+  const services = await repos.service.listByProject(project.id).catch(() => []);
+  const seenContainers = new Set<string>();
+
+  const pushContainer = (containerId: string, runtime: RuntimeAdapter, labelPrefix: string) => {
+    if (seenContainers.has(containerId)) return;
+    seenContainers.add(containerId);
+    resources.push({
+      type: "container",
+      ref: containerId,
+      label: `${labelPrefix} ${containerId.slice(0, 12)}`,
+      runtime,
+    });
+  };
 
   // ── Deployment containers + images + service containers ────────────
   const { rows: allDeps } = await repos.deployment.listByProject(project.id, { perPage: 1000 });
@@ -66,29 +76,17 @@ export async function collectProjectManifest(project: Project): Promise<CleanupM
       continue;
     }
 
-    // Service containers (compose projects)
-    if (isCompose) {
-      const serviceRows = await repos.service.listByDeployment(dep.id);
-      for (const sd of serviceRows) {
-        if (sd.containerId) {
-          resources.push({
-            type: "container",
-            ref: sd.containerId,
-            label: `service container ${sd.containerId.slice(0, 12)}`,
-            runtime,
-          });
-        }
+    // Service containers
+    const serviceRows = await repos.service.listByDeployment(dep.id);
+    for (const sd of serviceRows) {
+      if (sd.containerId) {
+        pushContainer(sd.containerId, runtime, "service container");
       }
     }
 
     // Main deployment container
     if (dep.containerId) {
-      resources.push({
-        type: "container",
-        ref: dep.containerId,
-        label: `deployment container ${dep.containerId.slice(0, 12)}`,
-        runtime,
-      });
+      pushContainer(dep.containerId, runtime, "deployment container");
     }
 
     // Docker images (deduplicated)
@@ -119,24 +117,21 @@ export async function collectProjectManifest(project: Project): Promise<CleanupM
     });
   }
 
-  // ── Service routes (compose) ───────────────────────────────────────
-  if (isCompose) {
-    const services = await repos.service.listByProject(project.id).catch(() => []);
-    for (const svc of services) {
-      const route = buildServiceRouteDomain({
-        project,
-        service: svc,
-        runtimeName: "bare",
-        usesManagedRouting: true,
+  // ── Service routes ─────────────────────────────────────────────────
+  for (const svc of services) {
+    const route = buildServiceRouteDomain({
+      project,
+      service: svc,
+      runtimeName: "bare",
+      usesManagedRouting: true,
+    });
+    if (route) {
+      resources.push({
+        type: "route",
+        ref: route.hostname,
+        label: `service route ${route.hostname}`,
+        runtime: null,
       });
-      if (route) {
-        resources.push({
-          type: "route",
-          ref: route.hostname,
-          label: `service route ${route.hostname}`,
-          runtime: null,
-        });
-      }
     }
   }
 
@@ -149,18 +144,21 @@ export async function collectProjectManifest(project: Project): Promise<CleanupM
  */
 export async function collectDeploymentManifest(
   dep: Deployment,
-  project: Project | null,
+  _project: Project | null,
 ): Promise<CleanupManifest> {
   const resources: CleanupResource[] = [];
-  const isCompose = project ? isComposeProject(project) : false;
-
-  const containerIds = isCompose
-    ? (await repos.service.listByDeployment(dep.id))
-        .map((r) => r.containerId)
-        .filter((id): id is string => !!id)
-    : dep.containerId
-      ? [dep.containerId]
-      : [];
+  const serviceContainerIds = (await repos.service.listByDeployment(dep.id))
+    .map((r) => r.containerId)
+    .filter((id): id is string => !!id);
+  const containerIds = [
+    ...new Set(
+      serviceContainerIds.length > 0
+        ? serviceContainerIds
+        : dep.containerId
+          ? [dep.containerId]
+          : [],
+    ),
+  ];
 
   if (containerIds.length > 0) {
     let runtime: RuntimeAdapter;

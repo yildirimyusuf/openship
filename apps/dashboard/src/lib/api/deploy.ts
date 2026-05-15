@@ -1,5 +1,69 @@
 import { api } from "./client";
 import { endpoints } from "./endpoints";
+import type { StackId } from "@repo/core";
+
+export type PrepareProjectSource =
+  | { source?: "github"; owner: string; repo: string; branch?: string; force?: string | boolean }
+  | { source: "local"; path: string };
+
+export interface PrepareComposeService {
+  name: string;
+  image?: string;
+  build?: string;
+  dockerfile?: string;
+  ports: string[];
+  dependsOn: string[];
+  environment: Record<string, string>;
+  environmentMeta?: Record<
+    string,
+    {
+      source: "env-file" | "default" | "missing" | "interpolated";
+      variable?: string;
+      defaultValue?: string;
+      resolvedValue: string;
+      expression?: string;
+    }
+  >;
+  volumes: string[];
+  command?: string;
+  restart?: string;
+  exposed?: boolean;
+  exposedPort?: string;
+  domain?: string;
+  customDomain?: string;
+  domainType?: "free" | "custom";
+}
+
+export interface PrepareProjectResponse {
+  repository: {
+    name: string;
+    full_name: string;
+    owner?: { login: string };
+    private: boolean;
+    default_branch: string;
+    selected_branch?: string;
+    clone_url?: string;
+    html_url?: string;
+    branches?: Array<{ name: string }>;
+  };
+  stack: StackId;
+  projectType: "app" | "docker" | "services";
+  category: string;
+  packageManager: string;
+  buildCommand: string;
+  installCommand: string;
+  startCommand: string;
+  buildImage: string;
+  outputDirectory: string;
+  rootDirectory: string;
+  productionPaths: string[];
+  port: number;
+  services?: PrepareComposeService[];
+  rootEnv?: Record<string, string>;
+  error?: string;
+  current_status?: string;
+  exists?: boolean;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Deploy / Build API                                                */
@@ -27,11 +91,8 @@ export const deployApi = {
     api.post<any>(endpoints.deploy.rollback(id)),
 
   /** Resolve project info from GitHub repo or local path — detects stack */
-  prepare: (body:
-    | { source?: "github"; owner: string; repo: string; branch?: string; force?: string | boolean }
-    | { source: "local"; path: string }
-  ) =>
-    api.post<any>(endpoints.deploy.prepare, body),
+  prepare: (body: PrepareProjectSource) =>
+    api.post<PrepareProjectResponse>(endpoints.deploy.prepare, body),
 
   /** Create deployment + build session for an existing project */
   buildAccess: (payload: {
@@ -39,11 +100,18 @@ export const deployApi = {
     branch?: string;
     environment?: string;
     envVars?: Record<string, string>;
-    customDomain?: string;
+    publicEndpoints?: Array<{
+      port?: string;
+      targetPath?: string;
+      domain: string;
+      customDomain: string;
+      domainType: "free" | "custom";
+    }>;
     buildStrategy?: "server" | "local";
     deployTarget?: "local" | "server" | "cloud";
     serverId?: string;
     runtimeMode?: "bare" | "docker";
+    serviceDeploymentMode?: "services" | "single";
     services?: Array<{
       name: string;
       image?: string;

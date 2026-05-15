@@ -673,7 +673,7 @@ export function getInstallCommand(pm: string): string {
 }
 
 /** Build command — prefers project scripts, then falls back to registry defaults */
-function getBuildCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
+export function getBuildCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
   const runner = pm === "npm" ? "npm run" : pm;
 
@@ -687,7 +687,7 @@ function getBuildCommand(pm: string, stack: StackId, packageJson?: Record<string
 }
 
 /** Start command — prefers project scripts, then falls back to registry defaults */
-function getStartCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
+export function getStartCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
   const runner = pm === "npm" ? "npm run" : pm;
 

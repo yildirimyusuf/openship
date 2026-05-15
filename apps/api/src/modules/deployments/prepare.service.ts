@@ -6,12 +6,32 @@
  */
 
 import * as githubService from "../github/github.service";
-import { detectStack, MANIFEST_FILES, type RepoFile, type StackResult } from "../../lib/stack-detector";
+import { MANIFEST_FILES, type RepoFile, type StackResult } from "../../lib/stack-detector";
 import { parseComposeEnvFile, parseComposeFile, type ComposeService } from "../../lib/compose-parser";
+import {
+  applyWorkspaceContext,
+  discoverProjectRootHints,
+  isIgnoredRepoPath,
+  normalizeProjectRootDirectory,
+  selectPreferredProjectRoot,
+  type ProjectRootSnapshot,
+  type ProjectRootSnapshotInput,
+  type RepoTreeEntry,
+} from "../../lib/project-root-detector";
 import type { ProjectType } from "@repo/core";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { env } from "../../config";
+
+const PREPARE_FILE_CONTENTS = [...MANIFEST_FILES, "pnpm-workspace.yaml", "vercel.json"] as const;
+const COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] as const;
+
+interface ProjectReader {
+  listDirectory: (path: string) => Promise<RepoFile[]>;
+  readText: (path: string) => Promise<string | undefined>;
+  readJson: (path: string) => Promise<Record<string, unknown> | undefined>;
+  listTree: () => Promise<RepoTreeEntry[]>;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,10 +60,224 @@ export interface ProjectInfo {
   startCommand: string;
   buildImage: string;
   outputDirectory: string;
+  rootDirectory: string;
   productionPaths: string[];
   port: number;
   services?: ComposeService[];
   rootEnv?: Record<string, string>;
+}
+
+function joinProjectPath(rootDirectory: string, name: string): string {
+  const normalizedRootDirectory = normalizeProjectRootDirectory(rootDirectory);
+  return normalizedRootDirectory ? `${normalizedRootDirectory}/${name}` : name;
+}
+
+async function readProjectSnapshot(
+  reader: ProjectReader,
+  rootDirectory = "",
+  source: ProjectRootSnapshotInput["source"] = "root",
+): Promise<ProjectRootSnapshotInput> {
+  const normalizedRootDirectory = normalizeProjectRootDirectory(rootDirectory);
+  const files = await reader.listDirectory(normalizedRootDirectory);
+  const packageJson = await reader.readJson(joinProjectPath(normalizedRootDirectory, "package.json"));
+  const fileContents: Record<string, string> = {};
+
+  await Promise.all(
+    PREPARE_FILE_CONTENTS
+      .filter((name) => files.some((file) => file.name.toLowerCase() === name.toLowerCase()))
+      .map(async (name) => {
+        const content = await reader.readText(joinProjectPath(normalizedRootDirectory, name));
+        if (content) {
+          fileContents[name] = content;
+        }
+      }),
+  );
+
+  return {
+    rootDirectory: normalizedRootDirectory,
+    files,
+    packageJson,
+    fileContents,
+    source,
+  };
+}
+
+async function loadCandidateSnapshot(
+  reader: ProjectReader,
+  rootDirectory: string,
+  source: ProjectRootSnapshotInput["source"],
+): Promise<ProjectRootSnapshotInput | null> {
+  const snapshot = await readProjectSnapshot(reader, rootDirectory, source);
+  if (!snapshot.rootDirectory || snapshot.files.length === 0) {
+    return null;
+  }
+
+  return snapshot;
+}
+
+async function selectProjectSnapshot(
+  reader: ProjectReader,
+  rootSnapshot: ProjectRootSnapshotInput,
+): Promise<ProjectRootSnapshot> {
+  const treeEntries = await reader.listTree().catch(() => [] as RepoTreeEntry[]);
+  const hints = discoverProjectRootHints(
+    treeEntries,
+    rootSnapshot.fileContents,
+    rootSnapshot.packageJson,
+  );
+
+  const candidates = (await Promise.all(
+    hints.map((hint) => loadCandidateSnapshot(reader, hint.rootDirectory, hint.source)),
+  )).filter((candidate): candidate is ProjectRootSnapshotInput => Boolean(candidate));
+
+  return applyWorkspaceContext(
+    rootSnapshot,
+    selectPreferredProjectRoot(rootSnapshot, candidates),
+  );
+}
+
+function createGitHubReader(
+  userId: string,
+  owner: string,
+  repo: string,
+  branch: string,
+): ProjectReader {
+  let treePromise: Promise<RepoTreeEntry[]> | null = null;
+
+  const readText = async (path: string) => {
+    try {
+      const file = await githubService.getFileContent(userId, owner, repo, path, { branch });
+      return file?.content;
+    } catch {
+      return undefined;
+    }
+  };
+
+  return {
+    listDirectory: async (path: string) => {
+      try {
+        const contents = await githubService.listFiles(userId, owner, repo, {
+          branch,
+          ...(path ? { path } : {}),
+        });
+
+        return Array.isArray(contents)
+          ? contents.map((file: any) => ({
+              name: file.name,
+              type: file.type === "dir" ? "dir" : "file",
+            }))
+          : [];
+      } catch {
+        return [];
+      }
+    },
+    readText,
+    readJson: async (path: string) => {
+      const content = await readText(path);
+      if (!content) return undefined;
+      try {
+        return JSON.parse(content);
+      } catch {
+        return undefined;
+      }
+    },
+    listTree: async () => {
+      if (!treePromise) {
+        treePromise = githubService.listRepositoryTree(userId, owner, repo, { branch });
+      }
+      return treePromise;
+    },
+  };
+}
+
+async function listLocalTree(dirPath: string): Promise<RepoTreeEntry[]> {
+  const tree: RepoTreeEntry[] = [];
+
+  const visit = async (absolutePath: string, relativePath = "") => {
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const nextRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+      if (entry.isDirectory() && isIgnoredRepoPath(nextRelativePath)) {
+        continue;
+      }
+
+      tree.push({ path: nextRelativePath, type: entry.isDirectory() ? "dir" : "file" });
+      if (entry.isDirectory()) {
+        await visit(join(absolutePath, entry.name), nextRelativePath);
+      }
+    }
+  };
+
+  await visit(dirPath);
+  return tree;
+}
+
+function createLocalReader(dirPath: string): ProjectReader {
+  let treePromise: Promise<RepoTreeEntry[]> | null = null;
+
+  const absolutePathFor = (path: string) => path ? join(dirPath, path) : dirPath;
+
+  return {
+    listDirectory: async (path: string) => {
+      try {
+        const entries = await readdir(absolutePathFor(path), { withFileTypes: true });
+        return entries.map((entry) => ({
+          name: entry.name,
+          type: entry.isDirectory() ? "dir" : "file",
+        }));
+      } catch {
+        return [];
+      }
+    },
+    readText: async (path: string) => {
+      try {
+        return await readFile(absolutePathFor(path), "utf-8");
+      } catch {
+        return undefined;
+      }
+    },
+    readJson: async (path: string) => {
+      try {
+        return JSON.parse(await readFile(absolutePathFor(path), "utf-8"));
+      } catch {
+        return undefined;
+      }
+    },
+    listTree: async () => {
+      if (!treePromise) {
+        treePromise = listLocalTree(dirPath);
+      }
+      return treePromise;
+    },
+  };
+}
+
+async function readProjectText(
+  reader: ProjectReader,
+  rootDirectory: string,
+  name: string,
+): Promise<string | undefined> {
+  return reader.readText(joinProjectPath(rootDirectory, name));
+}
+
+async function readComposeText(
+  reader: ProjectReader,
+  rootDirectory: string,
+  files: RepoFile[],
+): Promise<string | undefined> {
+  for (const name of COMPOSE_FILES) {
+    if (!files.some((file) => file.name.toLowerCase() === name)) {
+      continue;
+    }
+
+    const composeContent = await readProjectText(reader, rootDirectory, name);
+    if (composeContent) {
+      return composeContent;
+    }
+  }
+
+  return undefined;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -57,7 +291,6 @@ export async function resolveProjectInfo(input: Source): Promise<ProjectInfo> {
     return resolveFromGitHub(input.userId, input.owner, input.repo, input.branch);
   }
 
-  // Local filesystem access — blocked in cloud mode
   if (env.CLOUD_MODE) {
     throw new Error("Local project resolution is not available in cloud mode");
   }
@@ -86,81 +319,13 @@ async function resolveFromGitHub(
     }
   }
 
-  let files: RepoFile[] = [];
-  let packageJson: Record<string, unknown> | undefined;
+  const reader = createGitHubReader(userId, owner, repo, selectedBranch);
+  const rootSnapshot = await readProjectSnapshot(reader);
+  const selectedProject = await selectProjectSnapshot(reader, rootSnapshot);
+  const composeContent = await readComposeText(reader, selectedProject.rootDirectory, selectedProject.files);
+  const composeEnvContent = await readProjectText(reader, selectedProject.rootDirectory, ".env");
 
-  try {
-    const contents = await githubService.listFiles(userId, owner, repo, {
-      branch: selectedBranch,
-    });
-    if (Array.isArray(contents)) {
-      files = contents.map((f: any) => ({
-        name: f.name,
-        type: f.type === "dir" ? "dir" : "file",
-      }));
-    }
-  } catch {
-    // Repo might be empty
-  }
-
-  try {
-    const pkgFile = await githubService.getFileContent(userId, owner, repo, "package.json", {
-      branch: selectedBranch,
-      json: true,
-    });
-    if (pkgFile?.content) {
-      packageJson = typeof pkgFile.content === "string"
-        ? JSON.parse(pkgFile.content)
-        : pkgFile.content;
-    }
-  } catch {
-    // No package.json
-  }
-
-  // Try reading compose file
-  let composeContent: string | undefined;
-  const composeNames = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
-  for (const name of composeNames) {
-    if (files.some((f) => f.name.toLowerCase() === name)) {
-      try {
-        const composeFile = await githubService.getFileContent(userId, owner, repo, name, {
-          branch: selectedBranch,
-        });
-        if (composeFile?.content) {
-          composeContent = composeFile.content;
-          break;
-        }
-      } catch {
-        // Not found, try next
-      }
-    }
-  }
-
-  let composeEnvContent: string | undefined;
-  try {
-    const envFile = await githubService.getFileContent(userId, owner, repo, ".env", {
-      branch: selectedBranch,
-    });
-    composeEnvContent = envFile?.content;
-  } catch {
-    // No project .env file committed — compose defaults still apply.
-  }
-
-  // Read manifest files for deep stack detection
-  const manifests: Record<string, string> = {};
-  const manifestReads = MANIFEST_FILES
-    .filter((name) => files.some((f) => f.name.toLowerCase() === name.toLowerCase()))
-    .map(async (name) => {
-      try {
-        const file = await githubService.getFileContent(userId, owner, repo, name, {
-          branch: selectedBranch,
-        });
-        if (file?.content) manifests[name] = file.content;
-      } catch { /* skip */ }
-    });
-  await Promise.all(manifestReads);
-
-  return toProjectInfo(repository, files, packageJson, composeContent, manifests, selectedBranch, composeEnvContent);
+  return toProjectInfo(repository, selectedProject, composeContent, selectedBranch, composeEnvContent);
 }
 
 // ─── Local filesystem ────────────────────────────────────────────────────────
@@ -171,50 +336,9 @@ async function resolveFromLocal(dirPath: string): Promise<ProjectInfo> {
     throw new Error("Path is not a directory");
   }
 
-  const entries = await readdir(dirPath, { withFileTypes: true });
-  const files: RepoFile[] = entries.map((e) => ({
-    name: e.name,
-    type: e.isDirectory() ? "dir" : "file",
-  }));
-
-  let packageJson: Record<string, unknown> | undefined;
-  try {
-    const raw = await readFile(`${dirPath}/package.json`, "utf-8");
-    packageJson = JSON.parse(raw);
-  } catch {
-    // No package.json or invalid — that's fine
-  }
-
-  // Try reading compose file
-  let composeContent: string | undefined;
-  const composeNames = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
-  for (const name of composeNames) {
-    try {
-      composeContent = await readFile(`${dirPath}/${name}`, "utf-8");
-      break;
-    } catch {
-      // Try next
-    }
-  }
-
-  let composeEnvContent: string | undefined;
-  try {
-    composeEnvContent = await readFile(`${dirPath}/.env`, "utf-8");
-  } catch {
-    // No project .env file — compose defaults still apply.
-  }
-
-  // Read manifest files for deep stack detection
-  const manifests: Record<string, string> = {};
-  await Promise.all(
-    MANIFEST_FILES.map(async (name) => {
-      try {
-        manifests[name] = await readFile(`${dirPath}/${name}`, "utf-8");
-      } catch { /* skip */ }
-    }),
-  );
-
-  const dirName = (packageJson?.name as string) ?? basename(dirPath);
+  const reader = createLocalReader(dirPath);
+  const rootSnapshot = await readProjectSnapshot(reader);
+  const dirName = (rootSnapshot.packageJson?.name as string) ?? basename(dirPath);
 
   const repoShape = {
     name: dirName,
@@ -224,7 +348,11 @@ async function resolveFromLocal(dirPath: string): Promise<ProjectInfo> {
     default_branch: "main",
   } as const;
 
-  return toProjectInfo(repoShape, files, packageJson, composeContent, manifests, repoShape.default_branch, composeEnvContent);
+  const selectedProject = await selectProjectSnapshot(reader, rootSnapshot);
+  const composeContent = await readComposeText(reader, selectedProject.rootDirectory, selectedProject.files);
+  const composeEnvContent = await readProjectText(reader, selectedProject.rootDirectory, ".env");
+
+  return toProjectInfo(repoShape, selectedProject, composeContent, repoShape.default_branch, composeEnvContent);
 }
 
 // ─── Shared mapper ───────────────────────────────────────────────────────────
@@ -241,24 +369,21 @@ function toProjectInfo(
     html_url?: string;
     branches?: { name: string }[];
   },
-  files: RepoFile[],
-  packageJson?: Record<string, unknown>,
+  projectRoot: ProjectRootSnapshot,
   composeContent?: string,
-  fileContents?: Record<string, string>,
   selectedBranch?: string,
   composeEnvContent?: string,
 ): ProjectInfo {
-  const stack = detectStack(files, packageJson, fileContents);
+  const stack = projectRoot.stack;
   const rootEnv = composeEnvContent ? parseComposeEnvFile(composeEnvContent) : {};
 
-  // Parse compose file if detected as a services project
   let services: ComposeService[] | undefined;
   if (composeContent && stack.projectType === "services") {
     try {
       const parsed = parseComposeFile(composeContent, { envFileContent: composeEnvContent });
       services = parsed.services;
     } catch {
-      // Invalid YAML — continue without services
+      // Invalid YAML — continue without services.
     }
   }
 
@@ -283,6 +408,7 @@ function toProjectInfo(
     startCommand: stack.startCommand,
     buildImage: stack.buildImage,
     outputDirectory: stack.outputDirectory,
+    rootDirectory: projectRoot.rootDirectory || "./",
     productionPaths: stack.productionPaths,
     port: stack.port,
     ...(services && { services }),

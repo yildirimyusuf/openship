@@ -11,6 +11,7 @@ import {
   ArrowRight,
   ChevronDown,
   Github,
+  Plus,
 } from "lucide-react";
 import type { GitHubRepo } from "@/context/GitHubContext";
 import { encodeRepoSlug } from "@/utils/repoSlug";
@@ -130,6 +131,18 @@ export function RepositoryList({
                 {acc.login}
               </button>
             ))}
+            {installUrl ? (
+              <a
+                href={installUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/50 text-muted-foreground transition-all hover:border-border hover:bg-muted/50 hover:text-foreground"
+                aria-label="Add GitHub account"
+                title="Add GitHub account"
+              >
+                <Plus className="size-4" />
+              </a>
+            ) : null}
           </div>
         )}
 

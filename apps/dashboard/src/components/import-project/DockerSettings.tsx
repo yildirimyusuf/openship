@@ -4,7 +4,7 @@ import { useDeployment } from "@/context/DeploymentContext";
 import { STACK_ICONS } from "@repo/core";
 
 const DockerSettings: React.FC = () => {
-  const { config, updateOptions } = useDeployment();
+  const { config, updateConfig } = useDeployment();
   const iconUrl = STACK_ICONS["docker"];
 
   return (
@@ -46,7 +46,14 @@ const DockerSettings: React.FC = () => {
           <input
             type="number"
             value={config.options.productionPort}
-            onChange={(e) => updateOptions({ productionPort: e.target.value })}
+            onChange={(e) => updateConfig({
+              productionPortTouched: true,
+              lastAutoDetectedEnvPort: null,
+              options: {
+                ...config.options,
+                productionPort: e.target.value,
+              },
+            })}
             placeholder="3000"
             min={1}
             max={65535}

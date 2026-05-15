@@ -8,7 +8,6 @@
  */
 
 import { repos } from "@repo/db";
-import { getRoutingBaseDomain } from "./routing-domains";
 
 const FETCH_TIMEOUT = 8_000;
 const FAVICON_REFRESH_TTL_MS = 24 * 60 * 60 * 1000;
@@ -53,10 +52,6 @@ async function resolvePreferredSiteUrl(
   const primaryDomain = await repos.domain.getPrimaryByProject(project.id);
   if (primaryDomain?.verified && primaryDomain.hostname?.trim()) {
     return normalizeSiteUrl(primaryDomain.hostname);
-  }
-
-  if (project.slug?.trim()) {
-    return normalizeSiteUrl(`${project.slug}.${getRoutingBaseDomain()}`);
   }
 
   return null;

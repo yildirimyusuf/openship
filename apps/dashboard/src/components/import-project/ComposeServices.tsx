@@ -6,24 +6,39 @@ import {
   Globe,
   Lock,
   KeyRound,
+  Code2,
+  ChevronDown,
+  ChevronUp,
   MoreHorizontal,
   Pencil,
   Trash2,
+  Settings2,
   X,
 } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { STACK_ICONS } from "@repo/core";
-import type { ComposeServiceInfo } from "@/context/deployment/types";
+import {
+  createPublicEndpoint,
+  resolveBuildImageForDeploymentMode,
+  usesServiceDeployment,
+  type ComposeServiceInfo,
+  type DeploymentConfig,
+  type PublicEndpoint,
+} from "@/context/deployment/types";
 import { normalizeSubdomain, normalizeSubdomainInput } from "@/utils/subdomain";
 import { Modal } from "@/components/ui/Modal";
 import DropdownMenu from "@/components/ui/DropdownMenu";
 import EnvironmentVariables from "./EnvironmentVariables";
+import BuildSettings from "./BuildSettings";
+import { cn } from "@/lib/utils";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const getExposedPort = (svc: ComposeServiceInfo) =>
   svc.ports[0]?.split(":").pop()?.split("/")[0];
+
+const PRIMARY_SINGLE_APP_SERVICE_NAMES = new Set(["web", "app", "frontend"]);
 
 type EnvVarRow = { key: string; value: string; visible: boolean };
 
@@ -67,6 +82,113 @@ const missingEnvCount = (service: ComposeServiceInfo) =>
   ).length;
 
 const portDisplay = (port: string) => port.split(":").pop()?.split("/")[0] || port;
+
+function resolveComposeServiceSingleAppDomain(
+  service: ComposeServiceInfo,
+  projectName: string,
+): string {
+  if (service.domain) {
+    return service.domain;
+  }
+
+  return PRIMARY_SINGLE_APP_SERVICE_NAMES.has(service.name)
+    ? normalizeSubdomain(projectName)
+    : normalizeSubdomain(`${projectName}-${service.name}`);
+}
+
+function deriveSingleAppEndpointsFromCompose(
+  config: DeploymentConfig,
+): { publicEndpoints: PublicEndpoint[]; productionPort: string } | null {
+  const projectName = config.projectName || config.repo || "project";
+  const composeEndpoints = config.services
+    .map((service, index) => {
+      if (!service.exposed) return null;
+
+      const port = service.exposedPort || getExposedPort(service) || "";
+      if (!port) return null;
+
+      return {
+        sourceIndex: index,
+        service,
+        endpoint: createPublicEndpoint({
+          port,
+          domainType: service.domainType || "free",
+          domain:
+            service.domainType === "custom"
+              ? ""
+              : resolveComposeServiceSingleAppDomain(service, projectName),
+          customDomain: service.domainType === "custom" ? service.customDomain || "" : "",
+        }),
+      };
+    })
+    .filter((entry): entry is {
+      sourceIndex: number;
+      service: ComposeServiceInfo;
+      endpoint: PublicEndpoint;
+    } => entry !== null)
+    .sort((left, right) => {
+      const leftPriority = PRIMARY_SINGLE_APP_SERVICE_NAMES.has(left.service.name) ? 0 : left.service.exposed ? 1 : 2;
+      const rightPriority = PRIMARY_SINGLE_APP_SERVICE_NAMES.has(right.service.name) ? 0 : right.service.exposed ? 1 : 2;
+      return leftPriority - rightPriority || left.sourceIndex - right.sourceIndex;
+    });
+
+  if (composeEndpoints.length === 0) {
+    return null;
+  }
+
+  const currentPort = config.options.productionPort.trim();
+  const primaryCandidate = composeEndpoints.find(({ endpoint }) => endpoint.port === currentPort) ?? composeEndpoints[0];
+  const primaryPort = primaryCandidate.endpoint.port;
+  const [currentPrimary, ...currentAdditional] = config.publicEndpoints;
+
+  const primaryEndpoint = createPublicEndpoint({
+    ...primaryCandidate.endpoint,
+    ...currentPrimary,
+    id: currentPrimary?.id,
+    port: primaryPort,
+    domain: currentPrimary?.domain || primaryCandidate.endpoint.domain,
+    customDomain: currentPrimary?.customDomain || primaryCandidate.endpoint.customDomain,
+    domainType: currentPrimary?.domainType ?? primaryCandidate.endpoint.domainType,
+  });
+
+  const matchedCurrent = new Set<number>();
+  const additionalEndpoints = composeEndpoints
+    .filter(({ sourceIndex }) => sourceIndex !== primaryCandidate.sourceIndex)
+    .map(({ endpoint }) => {
+      const existingIndex = currentAdditional.findIndex((candidate, index) => {
+        if (matchedCurrent.has(index)) return false;
+
+        return candidate.port === endpoint.port || (
+          candidate.domainType === endpoint.domainType &&
+          candidate.domain === endpoint.domain &&
+          candidate.customDomain === endpoint.customDomain
+        );
+      });
+
+      if (existingIndex === -1) {
+        return endpoint;
+      }
+
+      matchedCurrent.add(existingIndex);
+      const existing = currentAdditional[existingIndex];
+      return createPublicEndpoint({
+        ...endpoint,
+        ...existing,
+        id: existing.id,
+        port: endpoint.port,
+        domain: existing.domain || endpoint.domain,
+        customDomain: existing.customDomain || endpoint.customDomain,
+        domainType: existing.domainType ?? endpoint.domainType,
+      });
+    });
+
+  const preservedAdditional = currentAdditional.filter((_, index) => !matchedCurrent.has(index));
+
+  return {
+    publicEndpoints: [primaryEndpoint, ...additionalEndpoints, ...preservedAdditional],
+    productionPort: primaryPort,
+  };
+}
 
 const SkeletonBlock: React.FC<{ className: string }> = ({ className }) => (
   <div className={`animate-pulse rounded-md bg-muted ${className}`} />
@@ -605,6 +727,8 @@ const ComposeServices: React.FC = () => {
   const services = config.services || [];
   const sharedEnvVars = config.envVars || [];
   const rootEnvVars = config.rootEnvVars || [];
+  const isServiceDeployment = usesServiceDeployment(config);
+  const [modeOptionsOpen, setModeOptionsOpen] = useState(false);
 
   const updateService = useCallback(
     (index: number, updates: Partial<ComposeServiceInfo>) => {
@@ -639,64 +763,188 @@ const ComposeServices: React.FC = () => {
   const buildCount = services.filter((s) => s.build).length;
   const exposedCount = services.filter((s) => s.exposed).length;
 
+  const setDeploymentMode = useCallback(
+    (mode: "services" | "single") => {
+      const updates: Partial<DeploymentConfig> = {
+        serviceDeploymentMode: mode,
+        runtimeMode: mode === "services" ? "docker" : "bare",
+        buildStrategy: mode === "services" ? "server" : config.buildStrategy,
+        buildImage: resolveBuildImageForDeploymentMode(config, mode),
+      };
+
+      if (mode === "single") {
+        const singleAppEndpoints = deriveSingleAppEndpointsFromCompose(config);
+        if (singleAppEndpoints) {
+          updates.publicEndpoints = singleAppEndpoints.publicEndpoints;
+          updates.options = {
+            ...config.options,
+            productionPort: singleAppEndpoints.productionPort,
+          };
+        }
+      }
+
+      updateConfig(updates);
+    },
+    [config, updateConfig],
+  );
+
+  const modeOptions = [
+    {
+      id: "services" as const,
+      label: "Service stack",
+      description: "Deploy every compose service with its own runtime and domain.",
+      icon: Layers,
+    },
+    {
+      id: "single" as const,
+      label: "Single app",
+      description: "Use the normal build and start command flow for one app.",
+      icon: Code2,
+    },
+  ];
+
+  const selectedMode = modeOptions.find((option) => option.id === config.serviceDeploymentMode) ?? modeOptions[0];
+
   return (
-    <div className="bg-card rounded-2xl border border-border/50">
-      <div className="px-5 py-5 space-y-6">
-        {/* Header */}
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-primary/10 rounded-xl">
-            {iconUrl ? (
-              <img src={iconUrl} alt="Docker Compose" className="w-6 h-6" />
-            ) : (
-              <Layers className="w-6 h-6 text-primary" />
+    <div className="space-y-5">
+      <div className="bg-card rounded-2xl border border-border/50">
+        <div className="px-5 py-5 space-y-6">
+          {/* Header */}
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-primary/10 rounded-xl">
+              {iconUrl ? (
+                <img src={iconUrl} alt="Docker Compose" className="w-6 h-6" />
+              ) : (
+                <Layers className="w-6 h-6 text-primary" />
+              )}
+            </div>
+            <div>
+              <h3 className="text-[15px] font-semibold text-foreground">Docker Compose</h3>
+              <p className="text-xs text-muted-foreground">
+                {isServiceDeployment ? "Deploying as services" : "Deploying as a single app"}
+                {isServiceDeployment && (
+                  <>
+                    {" · "}
+                    {services.length} service{services.length !== 1 ? "s" : ""}
+                    {buildCount > 0 && ` · ${buildCount} build`}
+                    {exposedCount > 0 && ` · ${exposedCount} exposed`}
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {isServiceDeployment ? (
+            <>
+              <SharedEnvironmentCard
+                envVars={sharedEnvVars}
+                rootEnvVars={rootEnvVars}
+                onChange={updateSharedEnv}
+              />
+
+              {/* Services list */}
+              {services.length > 0 ? (
+                <div className="space-y-4">
+                  {services.map((svc, i) => (
+                    <ServiceCard
+                      key={svc.name}
+                      service={svc}
+                      projectName={config.projectName || config.repo}
+                      onUpdate={(updates) => updateService(i, updates)}
+                      onEnvChange={(env) => updateServiceEnv(i, env)}
+                      onDelete={() => deleteService(i)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <ServiceCardSkeleton />
+                  <ServiceCardSkeleton />
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="p-4 bg-muted/30 rounded-xl border border-border/50">
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  Internal services can reach each other by service name. Enable{" "}
+                  <strong className="text-foreground">Public domain</strong> only for services that
+                  should receive internet traffic.
+                </p>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-xl border border-border/50 bg-muted/20 p-4">
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Parsed compose services are kept for later, but this deployment will use the normal
+                single-app build, start command, environment, and domain settings.
+              </p>
+            </div>
+          )}
+
+          <div className="border-t border-border/50 pt-4">
+            <button
+              type="button"
+              onClick={() => setModeOptionsOpen((open) => !open)}
+              className="flex w-full items-center justify-between gap-4 text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex size-9 items-center justify-center rounded-xl bg-muted/40">
+                  <Settings2 className="size-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">Deployment mode</p>
+                  <p className="text-xs text-muted-foreground">
+                    {selectedMode.label} · Switch between service stack and single app handling.
+                  </p>
+                </div>
+              </div>
+              {modeOptionsOpen ? (
+                <ChevronUp className="size-4 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="size-4 text-muted-foreground" />
+              )}
+            </button>
+
+            {modeOptionsOpen && (
+              <div className="mt-4 rounded-xl border border-border/50 bg-muted/20 p-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {modeOptions.map((option) => {
+                    const Icon = option.icon;
+                    const selected = config.serviceDeploymentMode === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => setDeploymentMode(option.id)}
+                        className={cn(
+                          "flex items-start gap-3 rounded-xl border p-3 text-left transition-colors",
+                          selected
+                            ? "border-primary/40 bg-primary/10 text-foreground"
+                            : "border-border/50 bg-background/50 text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+                        )}
+                      >
+                        <span className={cn(
+                          "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg",
+                          selected ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
+                        )}>
+                          <Icon className="size-4" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-medium">{option.label}</span>
+                          <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                            {option.description}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
           </div>
-          <div>
-            <h3 className="text-[15px] font-semibold text-foreground">Docker Compose</h3>
-            <p className="text-xs text-muted-foreground">
-              {services.length} service{services.length !== 1 ? "s" : ""}
-              {buildCount > 0 && ` · ${buildCount} build`}
-              {exposedCount > 0 && ` · ${exposedCount} exposed`}
-            </p>
-          </div>
-        </div>
-
-        <SharedEnvironmentCard
-          envVars={sharedEnvVars}
-          rootEnvVars={rootEnvVars}
-          onChange={updateSharedEnv}
-        />
-
-        {/* Services list */}
-        {services.length > 0 ? (
-          <div className="space-y-4">
-            {services.map((svc, i) => (
-              <ServiceCard
-                key={svc.name}
-                service={svc}
-                projectName={config.projectName || config.repo}
-                onUpdate={(updates) => updateService(i, updates)}
-                onEnvChange={(env) => updateServiceEnv(i, env)}
-                onDelete={() => deleteService(i)}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <ServiceCardSkeleton />
-            <ServiceCardSkeleton />
-          </div>
-        )}
-
-        {/* Info */}
-        <div className="p-4 bg-muted/30 rounded-xl border border-border/50">
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            Internal services can reach each other by service name. Enable{" "}
-            <strong className="text-foreground">Public domain</strong> only for services that
-            should receive internet traffic.
-          </p>
         </div>
       </div>
+      {!isServiceDeployment && <BuildSettings />}
     </div>
   );
 };

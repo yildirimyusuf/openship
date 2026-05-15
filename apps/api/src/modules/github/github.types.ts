@@ -75,6 +75,21 @@ export interface GitHubFileContent {
   download_url: string | null;
 }
 
+export interface GitHubTreeEntry {
+  path: string;
+  mode: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+  size?: number;
+  url: string;
+}
+
+export interface GitHubTreeResponse {
+  sha: string;
+  truncated: boolean;
+  tree: GitHubTreeEntry[];
+}
+
 export interface GitHubCheckRun {
   id: number;
   status: string;

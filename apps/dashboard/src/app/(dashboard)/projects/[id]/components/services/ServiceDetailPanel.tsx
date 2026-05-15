@@ -2,9 +2,9 @@
 
 import React, { useState } from "react";
 import { usePlatform } from "@/context/PlatformContext";
-import { servicesApi, type Service, type ServiceContainer } from "@/lib/api/services";
+import { useToast } from "@/context/ToastContext";
+import { servicesApi, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
 import { resolveServiceHostnameLabel } from "@repo/core";
-import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
 import {
   Play,
   Square,
@@ -24,7 +24,10 @@ import {
   Check,
   HardDrive,
   Settings,
+  Pencil,
+  Trash2,
 } from "lucide-react";
+import { ServiceEditorModal } from "./ServiceEditorModal";
 
 /* ── Props ──────────────────────────────────────────────────────────── */
 
@@ -33,8 +36,8 @@ interface ServiceDetailPanelProps {
   container?: ServiceContainer;
   projectId: string;
   projectSlugBase: string;
-  onClose: () => void;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
+  onDeleted?: () => void;
 }
 
 /* ── Panel ──────────────────────────────────────────────────────────── */
@@ -44,14 +47,17 @@ export function ServiceDetailPanel({
   container,
   projectId,
   projectSlugBase,
-  onClose,
   onRefresh,
+  onDeleted,
 }: ServiceDetailPanelProps) {
   const { baseDomain } = usePlatform();
+  const { showToast } = useToast();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [routingSaving, setRoutingSaving] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const status = container?.status ?? (service.enabled ? "stopped" : "disabled");
 
   const resolvedUrl = service.exposed
@@ -90,13 +96,31 @@ export function ServiceDetailPanel({
     }
   };
 
-  const handleRoutingUpdate = async (patch: Partial<Service>) => {
-    setRoutingSaving(true);
+  const handleUpdateService = async (data: ServiceInput) => {
+    const result = await servicesApi.update(projectId, service.id, data);
+    if (!result.success) {
+      throw new Error("Failed to update service");
+    }
+
+    await onRefresh();
+    showToast("Service updated", "success", data.name);
+  };
+
+  const handleDeleteService = async () => {
+    setDeleting(true);
     try {
-      await servicesApi.update(projectId, service.id, patch);
-      onRefresh();
+      const result = await servicesApi.delete(projectId, service.id);
+      if (!result.success) {
+        throw new Error("Failed to delete service");
+      }
+      showToast("Service deleted", "success", service.name);
+      setConfirmDelete(false);
+      onDeleted?.();
+      await onRefresh();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Failed to delete service", "error");
     } finally {
-      setRoutingSaving(false);
+      setDeleting(false);
     }
   };
 
@@ -133,6 +157,23 @@ export function ServiceDetailPanel({
                   <ExternalLink className="size-3.5" />
                 </a>
               )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setEditOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-foreground/[0.06] px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
+              >
+                <Pencil className="size-3.5" />
+                Edit
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-red-500/10 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-500/20 dark:text-red-400"
+              >
+                <Trash2 className="size-3.5" />
+                Delete
+              </button>
             </div>
           </div>
         </div>
@@ -173,35 +214,6 @@ export function ServiceDetailPanel({
               {service.enabled ? "Disable Service" : "Enable Service"}
             </button>
           </div>
-        </div>
-      </div>
-
-      {/* ── Routing ────────────────────────────────────────────── */}
-      <div className="bg-card rounded-2xl border border-border/50 overflow-hidden">
-        <SectionHeader title="Routing" subtitle="Control how this service is accessed" icon={Globe} />
-        <div className="px-6 pb-6">
-          <RoutingSettingsCard
-            projectName={projectSlugBase}
-            domain={service.domain ?? ""}
-            customDomain={service.customDomain ?? ""}
-            domainType={service.domainType === "custom" ? "custom" : "free"}
-            exposed={service.exposed}
-            ports={service.ports}
-            exposedPort={service.exposedPort ?? ""}
-            disabled={routingSaving || !service.enabled}
-            liveUrl={resolvedUrl}
-            onExposedChange={(value) => handleRoutingUpdate({ exposed: value })}
-            onDomainTypeChange={(value) => handleRoutingUpdate({ domainType: value })}
-            onDomainChange={(value) => handleRoutingUpdate({ domain: value })}
-            onCustomDomainChange={(value) => handleRoutingUpdate({ customDomain: value })}
-            onExposedPortChange={(value) => handleRoutingUpdate({ exposedPort: value })}
-            saveMode="explicit"
-          />
-          {!service.enabled && service.exposed && (
-            <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
-              Service is disabled — routes are inactive until the service is re-enabled.
-            </p>
-          )}
         </div>
       </div>
 
@@ -297,6 +309,49 @@ export function ServiceDetailPanel({
                   </button>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ServiceEditorModal
+        open={editOpen}
+        mode="edit"
+        service={service}
+        projectName={projectSlugBase}
+        onClose={() => setEditOpen(false)}
+        onSubmit={handleUpdateService}
+      />
+
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+          onClick={() => setConfirmDelete(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border/60 bg-card p-5 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-foreground">Delete service</h3>
+            <p className="mt-2 text-sm text-muted-foreground">
+              This removes "{service.name}" from the project and cleans up its active container and route.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDelete(false)}
+                disabled={deleting}
+                className="inline-flex h-10 items-center rounded-xl bg-foreground/[0.06] px-4 text-sm font-medium text-foreground transition-colors hover:bg-foreground/[0.1] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteService}
+                disabled={deleting}
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-red-500 px-4 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+              >
+                {deleting && <Loader2 className="size-4 animate-spin" />}
+                Delete service
+              </button>
             </div>
           </div>
         </div>

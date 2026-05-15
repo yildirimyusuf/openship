@@ -27,7 +27,7 @@ import { ServicesTab } from "../components/ServicesTab";
 import { ProjectSidebar, ProjectMobileTabs } from "../components/ProjectSidebar";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useToast } from "@/context/ToastContext";
 import { projectsApi } from "@/lib/api";
 import ErrorState from "@/components/shared/ErrorState";
@@ -46,6 +46,7 @@ const branchToEnvironmentName = (branch: string) =>
 const EnvironmentSwitcher = () => {
   const { projectData, environments, createEnvironment, activeTab } = useProjectSettings();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { showToast } = useToast();
   const [isOpen, setIsOpen] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
@@ -101,6 +102,16 @@ const EnvironmentSwitcher = () => {
     setLoadingBranches(false);
   }, []);
 
+  const activateBranchCreator = useCallback((branchSeed?: string) => {
+    setIsAdding(true);
+    setIsOpen(false);
+    setManualMode(false);
+    setBranchQuery(branchSeed ?? "");
+    setManualEnvironmentName("");
+    setManualBranch("");
+    setCreatingBranch(null);
+  }, []);
+
   const openSwitcher = useCallback(() => {
     if (isOpen) {
       closeMenus();
@@ -123,14 +134,16 @@ const EnvironmentSwitcher = () => {
       return;
     }
 
-    setIsAdding(true);
-    setIsOpen(false);
-    setManualMode(false);
-    setBranchQuery("");
-    setManualEnvironmentName("");
-    setManualBranch("");
-    setCreatingBranch(null);
-  }, [closeMenus, isAdding]);
+    activateBranchCreator();
+  }, [activateBranchCreator, closeMenus, isAdding]);
+
+  useEffect(() => {
+    const shouldCreateEnvironment = searchParams.get("createEnvironment") === "1";
+    if (!projectData.id || !shouldCreateEnvironment) return;
+
+    activateBranchCreator(searchParams.get("branch")?.trim() || undefined);
+    router.replace(`/projects/${projectData.id}/${activeTab}`);
+  }, [activeTab, activateBranchCreator, projectData.id, router, searchParams]);
 
   useEffect(() => {
     setBranches([]);
@@ -429,8 +442,6 @@ const ProjectSettingsContent = () => {
     isLoadingAnalytics,
   } = useProjectSettings();
 
-  const isServicesProject = tabs[0]?.id === "services";
-
   const { showToast } = useToast();
   const router = useRouter();
 
@@ -517,7 +528,7 @@ const ProjectSettingsContent = () => {
       case "advanced":
         return <AdvancedSettings onDeleteProject={handleDeleteProject} />;
       default:
-        return isServicesProject ? <ServicesTab /> : <OverviewTab />;
+        return <OverviewTab />;
     }
   };
 

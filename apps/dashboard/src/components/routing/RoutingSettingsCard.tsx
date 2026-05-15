@@ -23,13 +23,21 @@ export interface RoutingSettingsCardProps {
   domain: string;
   customDomain: string;
   domainType: "free" | "custom";
+  targetMode?: "proxy" | "static";
+  targetPath?: string;
   disabled?: boolean;
   liveUrl?: string | null;
   exposed?: boolean;
   onExposedChange?: (value: boolean) => void | Promise<void>;
   ports?: string[] | null;
   exposedPort?: string;
+  readOnlyTarget?: {
+    label: string;
+    value: string;
+    icon?: "port" | "path";
+  };
   onExposedPortChange?: (value: string) => void | Promise<void>;
+  onTargetPathChange?: (value: string) => void | Promise<void>;
   onDomainTypeChange: (value: "free" | "custom") => void | Promise<void>;
   onDomainChange: (value: string) => void | Promise<void>;
   onCustomDomainChange: (value: string) => void | Promise<void>;
@@ -41,13 +49,17 @@ export function RoutingSettingsCard({
   domain,
   customDomain,
   domainType,
+  targetMode = "proxy",
+  targetPath,
   disabled = false,
   liveUrl,
   exposed,
   onExposedChange,
   ports,
   exposedPort,
+  readOnlyTarget,
   onExposedPortChange,
+  onTargetPathChange,
   onDomainTypeChange,
   onDomainChange,
   onCustomDomainChange,
@@ -62,6 +74,7 @@ export function RoutingSettingsCard({
   const [draftDomain, setDraftDomain] = useState(domain);
   const [draftCustomDomain, setDraftCustomDomain] = useState(customDomain);
   const [draftPort, setDraftPort] = useState(exposedPort ?? "");
+  const [draftTargetPath, setDraftTargetPath] = useState(targetPath ?? "/");
 
   useEffect(() => {
     setDraftDomain(domain);
@@ -75,8 +88,15 @@ export function RoutingSettingsCard({
     setDraftPort(exposedPort ?? "");
   }, [exposedPort]);
 
+  useEffect(() => {
+    setDraftTargetPath(targetPath ?? "/");
+  }, [targetPath]);
+
   const visible = exposed ?? true;
   const hasPortOptions = (ports ?? []).length > 0;
+  const showsPortTarget = targetMode === "proxy" && typeof exposedPort !== "undefined" && onExposedPortChange;
+  const showsPathTarget = targetMode === "static" && onTargetPathChange;
+  const showsReadOnlyTarget = !showsPortTarget && !showsPathTarget && Boolean(readOnlyTarget?.value);
   const portOptions = useMemo(
     () => (ports ?? []).map((value) => {
       const parts = value.split(":");
@@ -138,6 +158,12 @@ export function RoutingSettingsCard({
     }
   };
 
+  const commitTargetPath = () => {
+    if (onTargetPathChange) {
+      void onTargetPathChange(draftTargetPath.trim() || "/");
+    }
+  };
+
   return (
     <div className="space-y-3">
       {typeof exposed === "boolean" && onExposedChange && (
@@ -166,17 +192,19 @@ export function RoutingSettingsCard({
               type="button"
               onClick={() => void onDomainTypeChange("free")}
               disabled={disabled}
+              aria-label="Free subdomain"
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${domainType === "free" ? "bg-primary/10 text-primary ring-1 ring-primary/15" : "bg-muted/40 text-muted-foreground hover:bg-muted/60"}`}
             >
-              Free subdomain
+              Free
             </button>
             <button
               type="button"
               onClick={() => void onDomainTypeChange("custom")}
               disabled={disabled}
+              aria-label="Custom domain"
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${domainType === "custom" ? "bg-primary/10 text-primary ring-1 ring-primary/15" : "bg-muted/40 text-muted-foreground hover:bg-muted/60"}`}
             >
-              Custom domain
+              Custom
             </button>
           </div>
 
@@ -209,10 +237,6 @@ export function RoutingSettingsCard({
                   </button>
                 )}
               </div>
-              <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-                <Shield className="size-3 text-emerald-500 shrink-0" />
-                SSL included. Live at <span className="font-medium text-foreground">{freePreview}</span>
-              </p>
             </div>
           ) : (
             <div className="space-y-2">
@@ -271,7 +295,7 @@ export function RoutingSettingsCard({
             </div>
           )}
 
-          {typeof exposedPort !== "undefined" && onExposedPortChange && (
+          {showsPortTarget && (
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
                 <Hash className="size-3.5 text-muted-foreground" />
@@ -319,6 +343,62 @@ export function RoutingSettingsCard({
                   Save
                 </button>
               )}
+            </div>
+          )}
+
+          {showsReadOnlyTarget && readOnlyTarget ? (
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                {readOnlyTarget.icon === "path" ? (
+                  <Link2 className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <Hash className="size-3.5 text-muted-foreground" />
+                )}
+                <span className="text-[13px] text-muted-foreground font-medium">
+                  {readOnlyTarget.label}
+                </span>
+              </div>
+              <span className="text-[13px] font-medium text-foreground">
+                {readOnlyTarget.value}
+              </span>
+            </div>
+          ) : null}
+
+          {showsPathTarget && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Link2 className="size-3.5 text-muted-foreground" />
+                  <span className="text-[13px] text-muted-foreground font-medium">Static path</span>
+                </div>
+                <div className="flex items-center gap-2 flex-1">
+                  <input
+                    value={saveMode === "explicit" ? draftTargetPath : (targetPath || "/")}
+                    onChange={(event) => {
+                      if (saveMode === "explicit") {
+                        setDraftTargetPath(event.target.value);
+                      } else {
+                        void onTargetPathChange(event.target.value || "/");
+                      }
+                    }}
+                    placeholder="/"
+                    disabled={disabled}
+                    className="flex-1 px-3 py-2 rounded-xl text-sm bg-muted/30 border border-border/40 text-foreground outline-none"
+                  />
+                  {saveMode === "explicit" && draftTargetPath !== (targetPath ?? "/") && (
+                    <button
+                      onClick={commitTargetPath}
+                      disabled={disabled}
+                      className="px-3 py-2 rounded-xl text-[12px] font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Serve files from this subdirectory inside the build output. Use <span className="font-medium text-foreground">/</span> for the root output.
+              </p>
             </div>
           )}
 

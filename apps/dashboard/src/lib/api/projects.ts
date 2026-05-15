@@ -1,9 +1,29 @@
 import { api } from "./client";
+import type { PrepareComposeService, PrepareProjectResponse } from "./deploy";
 import { endpoints } from "./endpoints";
 
 /* ------------------------------------------------------------------ */
 /*  Projects API                                                      */
 /* ------------------------------------------------------------------ */
+
+export interface ScanProjectResponse {
+  success: boolean;
+  name: string;
+  path: string;
+  stack: PrepareProjectResponse["stack"];
+  projectType: PrepareProjectResponse["projectType"];
+  category: PrepareProjectResponse["category"];
+  packageManager: PrepareProjectResponse["packageManager"];
+  installCommand: PrepareProjectResponse["installCommand"];
+  buildCommand: PrepareProjectResponse["buildCommand"];
+  startCommand: PrepareProjectResponse["startCommand"];
+  buildImage: PrepareProjectResponse["buildImage"];
+  outputDirectory: PrepareProjectResponse["outputDirectory"];
+  rootDirectory: PrepareProjectResponse["rootDirectory"];
+  productionPaths: PrepareProjectResponse["productionPaths"];
+  port: PrepareProjectResponse["port"];
+  services?: PrepareComposeService[];
+}
 
 export const projectsApi = {
   /** Dashboard overview — projects list + stats numbers */
@@ -31,6 +51,13 @@ export const projectsApi = {
     startCommand?: string;
     buildImage?: string;
     port?: number;
+    publicEndpoints?: Array<{
+      port?: number;
+      targetPath?: string;
+      domain?: string;
+      customDomain?: string;
+      domainType?: "free" | "custom";
+    }>;
     hasServer?: boolean;
     hasBuild?: boolean;
   }) => api.post<any>(endpoints.projects.ensure, body),
@@ -40,18 +67,7 @@ export const projectsApi = {
 
   /** Scan a local directory for framework detection */
   scan: (path: string) =>
-    api.post<{
-      success: boolean;
-      name: string;
-      path: string;
-      stack: string;
-      category: string;
-      packageManager: string;
-      installCommand: string;
-      buildCommand: string;
-      startCommand: string;
-      outputDirectory: string;
-    }>(endpoints.projects.scan, { path }),
+    api.post<ScanProjectResponse>(endpoints.projects.scan, { path }),
 
   /** Import a local folder as a project */
   importLocal: (data: {
@@ -62,7 +78,13 @@ export const projectsApi = {
     buildCommand?: string;
     installCommand?: string;
     outputDirectory?: string;
+    rootDirectory?: string;
+    startCommand?: string;
+    productionPaths?: string;
+    buildImage?: string;
     port?: number;
+    hasServer?: boolean;
+    hasBuild?: boolean;
   }) => api.post<{ data: any }>(endpoints.projects.import, data),
 
   /** Delete a local project */
@@ -98,6 +120,25 @@ export const projectsApi = {
   /** Update name or description */
   update: (id: string | number, action: string, value: string) =>
     api.post<any>(endpoints.projects.update(id), { action, value }),
+
+  /** Update full project fields */
+  patch: (
+    id: string | number,
+    body: {
+      name?: string;
+      slug?: string;
+      port?: number;
+      publicEndpoints?: Array<{
+        port?: number;
+        targetPath?: string;
+        domain?: string;
+        customDomain?: string;
+        domainType?: "free" | "custom";
+      }>;
+      hasServer?: boolean;
+      hasBuild?: boolean;
+    },
+  ) => api.patch<any>(endpoints.projects.item(id), body),
 
   /** Update build options (single field) */
   setOptions: (id: string | number, options: Record<string, any>) =>

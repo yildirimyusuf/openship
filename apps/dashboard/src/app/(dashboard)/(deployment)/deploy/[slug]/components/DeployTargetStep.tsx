@@ -3,7 +3,11 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, CheckCircle2, Loader2 } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
-import { servicesNeedCloud } from "@/context/deployment/types";
+import {
+  publicEndpointsNeedCloud,
+  servicesNeedCloud,
+  usesServiceDeployment,
+} from "@/context/deployment/types";
 import { useCloud } from "@/context/CloudContext";
 import { canUseCloudConnection, usePlatform } from "@/context/PlatformContext";
 import { systemApi } from "@/lib/api/system";
@@ -246,7 +250,9 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const { ready, servers, hasCloudConnected, hasCloudOption, hasChoice } = targets;
   const hasServers = servers.length > 0;
   const isSingleServer = servers.length === 1;
-  const showBuildStrategy = config.projectType === "app";
+  const isServiceDeployment = usesServiceDeployment(config);
+  const showBuildStrategy =
+    config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment);
   const canConnectCloud = canUseCloudConnection({ selfHosted, deployMode });
 
   // Auto-set deploy target when there's only one option
@@ -374,7 +380,12 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
       }
     }
 
-    if (config.projectType !== "services" && canConnectCloud && config.deployTarget !== "cloud" && config.domainType === "free") {
+    if (
+      !isServiceDeployment &&
+      canConnectCloud &&
+      config.deployTarget !== "cloud" &&
+      publicEndpointsNeedCloud(config.publicEndpoints)
+    ) {
       if (!requireCloud({
         feature: `Using free .${baseDomain} domains on your own server`,
         description: `Free .${baseDomain} domains are routed through Openship Cloud. To deploy this project to your own server, either connect Openship Cloud or switch this project to a custom domain.`,
@@ -385,7 +396,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     }
 
     // Compose services with free managed domains require cloud
-    if (config.projectType === "services" && servicesNeedCloud(config.services)) {
+    if (isServiceDeployment && servicesNeedCloud(config.services)) {
       if (!requireCloud({
         feature: `Using free .${baseDomain} domains for your services`,
         description: `One or more exposed services use free .${baseDomain} domains. To deploy them to your own server, either connect Openship Cloud or switch those services to custom domains.`,

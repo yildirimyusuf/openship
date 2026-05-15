@@ -111,6 +111,7 @@ export const auth = betterAuth({
 
   /* ---------- Account Linking ---------- */
   account: {
+    encryptOAuthTokens: true,
     accountLinking: {
       enabled: true,
       allowDifferentEmails: true,

@@ -11,6 +11,7 @@ export const endpoints = {
   /* ---------------------------------------------------------------- */
   projects: {
     home: "projects/home",
+    item: (id: string | number) => `projects/${id}`,
     local: "projects/local",
     scan: "projects/scan",
     import: "projects/import",
@@ -49,9 +50,12 @@ export const endpoints = {
   /* ---------------------------------------------------------------- */
   services: {
     list: (projectId: string | number) => `projects/${projectId}/services`,
+    create: (projectId: string | number) => `projects/${projectId}/services`,
     get: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}`,
     update: (projectId: string | number, serviceId: string) =>
+      `projects/${projectId}/services/${serviceId}`,
+    delete: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}`,
     sync: (projectId: string | number) => `projects/${projectId}/services/sync`,
     containers: (projectId: string | number) => `projects/${projectId}/services/containers`,

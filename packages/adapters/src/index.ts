@@ -16,6 +16,7 @@ export type {
   ContainerStatus,
   BuildStrategy,
   BuildConfig,
+  DeployPublicEndpoint,
   DeployConfig,
   BuildResult,
   DeploymentResult,

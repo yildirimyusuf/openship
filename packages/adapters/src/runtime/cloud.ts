@@ -88,6 +88,33 @@ function exposeTarget(port: number, slug?: string, domain = "opsh.io") {
   return slug ? `port ${port} for slug "${slug}" (${slug}.${domain})` : `port ${port}`;
 }
 
+type DeployPrimaryEndpoint = NonNullable<DeployConfig["publicEndpoints"]>[number];
+
+function primaryPublicEndpoint(config: Pick<DeployConfig, "publicEndpoints">): DeployPrimaryEndpoint | undefined {
+  return config.publicEndpoints?.[0];
+}
+
+function endpointSlug(endpoint?: DeployPrimaryEndpoint): string | undefined {
+  const slug = endpoint?.domain?.trim();
+  return endpoint?.domainType === "free" && slug ? slug : undefined;
+}
+
+function endpointCustomDomain(endpoint?: DeployPrimaryEndpoint): string | undefined {
+  const domain = endpoint?.customDomain?.trim();
+  return endpoint?.domainType === "custom" && domain ? domain : undefined;
+}
+
+function fallbackRuntimeName(config: Pick<DeployConfig, "runtimeName" | "projectId" | "deploymentId">): string {
+  const raw = config.runtimeName ?? `${config.projectId.slice(0, 20)}-${config.deploymentId.slice(0, 8)}`;
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+
+  return normalized || `deploy-${config.deploymentId.slice(0, 8)}`;
+}
+
 function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
@@ -246,6 +273,10 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
 
   private readonly client: Oblien;
   private readonly builtArtifacts = new Map<string, CloudBuiltArtifact>();
+  private readonly activeBuilds = new Map<string, {
+    abort: AbortController;
+    workspaceIds: Set<string>;
+  }>();
   private readonly compose: CloudComposeSupport;
 
   constructor(client: Oblien) {
@@ -273,128 +304,180 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     return this.client.workspace(workspaceId);
   }
 
+  private createActiveBuild(sessionId: string) {
+    const activeBuild = {
+      abort: new AbortController(),
+      workspaceIds: new Set<string>(),
+    };
+    this.activeBuilds.set(sessionId, activeBuild);
+    return activeBuild;
+  }
+
+  private trackActiveBuildWorkspace(sessionId: string, workspaceId: string): void {
+    this.activeBuilds.get(sessionId)?.workspaceIds.add(workspaceId);
+  }
+
+  private untrackActiveBuildWorkspace(sessionId: string, workspaceId: string): void {
+    this.activeBuilds.get(sessionId)?.workspaceIds.delete(workspaceId);
+  }
+
   // ── Build lifecycle ────────────────────────────────────────────────────
 
   async build(config: BuildConfig, logger?: BuildLogger): Promise<BuildResult> {
     const log = logger ?? new BuildLogger();
+    const activeBuild = this.createActiveBuild(config.sessionId);
 
-    if (config.stack === "docker" || config.dockerfilePath) {
-      return this.buildDockerfileWorkspace(config, log);
-    }
-
-    // "local" = build on the API host, then upload output to cloud workspace.
-    // "server" (default) = build inside the cloud workspace.
-    const buildLocally = config.buildStrategy === "local";
-
-    // 1. Provision workspace + acquire runtime token (logs to terminal)
-    let wsId: string;
-    let rt: Awaited<ReturnType<WorkspaceHandle["runtime"]>>;
     try {
-      const provisioned = await this.provisionBuildWorkspace(config, log);
-      wsId = provisioned.workspaceId;
-      rt = provisioned.runtime;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.log(`Failed to provision build environment: ${msg}`, "error");
-      return {
-        sessionId: config.sessionId,
-        status: "failed" as const,
-        durationMs: 0,
-        errorMessage: `Failed to provision build environment: ${msg}`,
-      };
-    }
+      if (config.stack === "docker" || config.dockerfilePath) {
+        const result = await this.buildDockerfileWorkspace(config, log);
+        return activeBuild.abort.signal.aborted
+          ? { ...result, status: "cancelled", errorMessage: undefined }
+          : result;
+      }
 
-    if (buildLocally) {
-      log.log("Build strategy: local (build on API host, upload to cloud)\n");
-      const stackDef: StackDefinition | undefined = STACKS[config.stack as StackId];
+      // "local" = build on the API host, then upload output to cloud workspace.
+      // "server" (default) = build inside the cloud workspace.
+      const buildLocally = config.buildStrategy === "local";
 
-      let result: Awaited<ReturnType<typeof runLocalBuild>>;
+      // 1. Provision workspace + acquire runtime token (logs to terminal)
+      let wsId: string;
+      let rt: Awaited<ReturnType<WorkspaceHandle["runtime"]>>;
       try {
-        result = await runLocalBuild({
-          config,
-          logger: log,
-          transferOutput: async (buildDir) => {
-            if (stackDef?.productionPaths?.length) {
-              // Compiled stacks — transfer only production artifacts
-              log.log(`Transferring production paths: ${stackDef.productionPaths.join(", ")}\n`);
-              await transferLocalDirectory(
-                buildDir,
-                { kind: "cloud-runtime", runtime: rt, path: "/app" },
-                log,
-                { includes: [...stackDef.productionPaths] },
-              );
-            } else {
-              // Runtime stacks — transfer everything except deps & caches
-              const excludes = [...TRANSFER_EXCLUDES, ...(stackDef?.cacheDirs ?? [])];
-              await transferLocalDirectory(
-                buildDir,
-                { kind: "cloud-runtime", runtime: rt, path: "/app" },
-                log,
-                { excludes },
-              );
-            }
-
-            // Install production dependencies with correct platform binaries
-            const installCmd = config.installCommand?.trim();
-            if (installCmd) {
-              log.log("Installing production dependencies on cloud...\n");
-              await this.execAndStream(rt, ["sh", "-c", `cd /app && ${installCmd}`], log.callback);
-            }
-          },
-        });
+        const provisioned = await this.provisionBuildWorkspace(config, log);
+        wsId = provisioned.workspaceId;
+        rt = provisioned.runtime;
+        this.trackActiveBuildWorkspace(config.sessionId, wsId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.log(`Failed to upload local build output: ${msg}`, "error");
+        log.log(`Failed to provision build environment: ${msg}`, "error");
         return {
           sessionId: config.sessionId,
-          status: "failed",
-          imageRef: wsId,
-          errorMessage: `Failed to upload build output: ${msg}`,
+          status: activeBuild.abort.signal.aborted ? "cancelled" : "failed",
+          durationMs: 0,
+          errorMessage: activeBuild.abort.signal.aborted
+            ? undefined
+            : `Failed to provision build environment: ${msg}`,
         };
       }
 
+      if (buildLocally) {
+        log.log("Build strategy: local (build on API host, upload to cloud)\n");
+        const stackDef: StackDefinition | undefined = STACKS[config.stack as StackId];
+
+        let result: Awaited<ReturnType<typeof runLocalBuild>>;
+        try {
+          result = await runLocalBuild({
+            config,
+            logger: log,
+            abort: activeBuild.abort.signal,
+            transferOutput: async (buildDir) => {
+              if (activeBuild.abort.signal.aborted) {
+                throw new Error("Build cancelled");
+              }
+
+              if (stackDef?.productionPaths?.length) {
+                // Compiled stacks — transfer only production artifacts
+                log.log(`Transferring production paths: ${stackDef.productionPaths.join(", ")}\n`);
+                await transferLocalDirectory(
+                  buildDir,
+                  { kind: "cloud-runtime", runtime: rt, path: "/app" },
+                  log,
+                  { includes: [...stackDef.productionPaths] },
+                );
+              } else {
+                // Runtime stacks — transfer everything except deps & caches
+                const excludes = [...TRANSFER_EXCLUDES, ...(stackDef?.cacheDirs ?? [])];
+                await transferLocalDirectory(
+                  buildDir,
+                  { kind: "cloud-runtime", runtime: rt, path: "/app" },
+                  log,
+                  { excludes },
+                );
+              }
+
+              if (activeBuild.abort.signal.aborted) {
+                throw new Error("Build cancelled");
+              }
+
+              // Install production dependencies with correct platform binaries
+              const installCmd = config.installCommand?.trim();
+              if (installCmd) {
+                log.log("Installing production dependencies on cloud...\n");
+                await this.execAndStream(rt, ["sh", "-c", `cd /app && ${installCmd}`], log.callback);
+              }
+            },
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.log(`Failed to upload local build output: ${msg}`, "error");
+          return {
+            sessionId: config.sessionId,
+            status: activeBuild.abort.signal.aborted ? "cancelled" : "failed",
+            imageRef: wsId,
+            errorMessage: activeBuild.abort.signal.aborted
+              ? undefined
+              : `Failed to upload local build output: ${msg}`,
+          };
+        }
+
+        return {
+          sessionId: config.sessionId,
+          status: activeBuild.abort.signal.aborted ? "cancelled" : result.status,
+          imageRef: wsId,
+          durationMs: result.durationMs,
+          errorMessage: activeBuild.abort.signal.aborted ? undefined : result.errorMessage,
+        };
+      }
+
+      // ── Server build: exec delegates to cloud runtime API ──
+      log.log("Build strategy: server (build in cloud workspace)\n");
+
+      const buildEnv: BuildEnvironment = {
+        projectDir: "/app",
+        hasNativeEnv: true,
+        exec: async (command, logCb) => {
+          if (activeBuild.abort.signal.aborted) {
+            throw new Error("Build cancelled");
+          }
+          await this.execAndStream(rt, ["sh", "-c", command], logCb);
+          if (activeBuild.abort.signal.aborted) {
+            throw new Error("Build cancelled");
+          }
+        },
+        preflight: async (cfg, plog) => {
+          if (activeBuild.abort.signal.aborted) {
+            throw new Error("Build cancelled");
+          }
+
+          if (!cfg.localPath) {
+            await this.ensureWorkspaceGit(rt, plog, "build workspace");
+            return;
+          }
+          await transferLocalDirectory(
+            cfg.localPath,
+            {
+              kind: "cloud-runtime",
+              runtime: rt,
+              path: "/app",
+            },
+            plog,
+          );
+        },
+      };
+
+      // 3. Run shared build pipeline (clone → install → build)
+      const result = await runBuildPipeline(buildEnv, config, log);
+
       return {
         sessionId: config.sessionId,
-        status: result.status,
+        status: activeBuild.abort.signal.aborted ? "cancelled" : result.status,
         imageRef: wsId,
         durationMs: result.durationMs,
-        errorMessage: result.errorMessage,
+        errorMessage: activeBuild.abort.signal.aborted ? undefined : result.errorMessage,
       };
+    } finally {
+      this.activeBuilds.delete(config.sessionId);
     }
-
-    // ── Server build: exec delegates to cloud runtime API ──
-    log.log("Build strategy: server (build in cloud workspace)\n");
-
-    const buildEnv: BuildEnvironment = {
-      projectDir: "/app",
-      hasNativeEnv: true,
-      exec: async (command, logCb) => {
-        await this.execAndStream(rt, ["sh", "-c", command], logCb);
-      },
-      preflight: async (cfg, plog) => {
-        if (!cfg.localPath) return;
-        await transferLocalDirectory(
-          cfg.localPath,
-          {
-            kind: "cloud-runtime",
-            runtime: rt,
-            path: "/app",
-          },
-          plog,
-        );
-      },
-    };
-
-    // 3. Run shared build pipeline (clone → install → build)
-    const result = await runBuildPipeline(buildEnv, config, log);
-
-    return {
-      sessionId: config.sessionId,
-      status: result.status,
-      imageRef: wsId,
-      durationMs: result.durationMs,
-      errorMessage: result.errorMessage,
-    };
   }
 
   private async buildDockerfileWorkspace(
@@ -445,6 +528,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
         logger: log,
         onWorkspaceCreated: (workspaceId) => {
           createdWorkspaceIds.push(workspaceId);
+          this.trackActiveBuildWorkspace(config.sessionId, workspaceId);
         },
       });
 
@@ -471,6 +555,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
         await this.ws(workspaceId)
           .delete()
           .catch(() => {});
+        this.untrackActiveBuildWorkspace(config.sessionId, workspaceId);
       }
 
       const message = err instanceof Error ? err.message : String(err);
@@ -548,6 +633,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
         logger,
       );
       sourceWorkspaceId = provisioned.workspaceId;
+      this.trackActiveBuildWorkspace(config.sessionId, provisioned.workspaceId);
 
       await this.ensureWorkspaceGit(provisioned.runtime, logger, "Dockerfile source workspace");
 
@@ -595,6 +681,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
               await this.ws(workspaceId)
                 .delete()
                 .catch(() => {});
+              this.untrackActiveBuildWorkspace(config.sessionId, workspaceId);
             },
           };
         }
@@ -617,6 +704,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
         await this.ws(sourceWorkspaceId)
           .delete()
           .catch(() => {});
+        this.untrackActiveBuildWorkspace(config.sessionId, sourceWorkspaceId);
       }
     }
   }
@@ -1112,8 +1200,20 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
   }
 
   async cancelBuild(sessionId: string): Promise<void> {
-    // The workspace ID is stored as imageRef — build.service.ts calls destroy() directly
-    void sessionId;
+    const activeBuild = this.activeBuilds.get(sessionId);
+    if (!activeBuild) {
+      return;
+    }
+
+    activeBuild.abort.abort();
+
+    const workspaceIds = [...activeBuild.workspaceIds];
+    await Promise.allSettled(
+      workspaceIds.map(async (workspaceId) => {
+        await this.destroy(workspaceId).catch(() => {});
+        activeBuild.workspaceIds.delete(workspaceId);
+      }),
+    );
   }
 
   async getBuildLogs(sessionId: string): Promise<LogEntry[]> {
@@ -1258,61 +1358,53 @@ fi`;
       throw new Error(`Failed to create workload: ${err instanceof Error ? err.message : err}`);
     }
 
-    // 4. Expose via custom domain OR free subdomain — not both
+    // 4. Expose the primary configured public endpoint, if any.
     let url: string | undefined;
+    const primaryEndpoint = primaryPublicEndpoint(config);
+    const primarySlug = endpointSlug(primaryEndpoint);
+    const primaryCustomDomain = endpointCustomDomain(primaryEndpoint);
+    const primaryPort = primaryEndpoint?.port ?? config.port;
 
-    if (config.customDomain) {
+    if (primaryCustomDomain) {
       try {
-        // publicAccess.expose() opens the firewall implicitly, but with
-        // custom domain we skip it — so allow the port via network instead
-        await ws.network.update({ ingress_ports: [config.port] });
+        // publicAccess.expose() opens the firewall implicitly, but with a
+        // custom domain we allow the target port explicitly instead.
+        await ws.network.update({ ingress_ports: [primaryPort] });
 
         await ws.domains.connect({
-          domain: config.customDomain,
-          port: config.port,
+          domain: primaryCustomDomain,
+          port: primaryPort,
         });
-        url = `https://${config.customDomain}`;
+        url = `https://${primaryCustomDomain}`;
       } catch (err) {
-        // Fall back to free subdomain if custom domain fails
-        console.error(
-          `Failed to connect custom domain ${config.customDomain}: ${err instanceof Error ? err.message : err}`,
+        throw new Error(
+          `Failed to connect custom domain ${primaryCustomDomain}: ${errorMessage(err)}`,
         );
-        try {
-          log({
-            timestamp: now(),
-            level: "info",
-            message: `Exposing ${exposeTarget(config.port, config.slug)}...\n`,
-          });
-          const exposeResult = await ws.publicAccess.expose({
-            port: config.port,
-            domain: "opsh.io",
-            slug: config.slug,
-          });
-          url = exposeResult.url as string | undefined;
-        } catch (exposeErr) {
-          throw new Error(
-            `Failed to expose ${exposeTarget(config.port, config.slug)} after custom domain "${config.customDomain}" failed: ${errorMessage(exposeErr)}`,
-          );
-        }
       }
-    } else {
+    } else if (primarySlug) {
       try {
         log({
           timestamp: now(),
           level: "info",
-          message: `Exposing ${exposeTarget(config.port, config.slug)}...\n`,
+          message: `Exposing ${exposeTarget(primaryPort, primarySlug)}...\n`,
         });
         const exposeResult = await ws.publicAccess.expose({
-          port: config.port,
+          port: primaryPort,
           domain: "opsh.io",
-          slug: config.slug,
+          slug: primarySlug,
         });
         url = exposeResult.url as string | undefined;
       } catch (err) {
         throw new Error(
-          `Failed to expose ${exposeTarget(config.port, config.slug)}: ${errorMessage(err)}`,
+          `Failed to expose ${exposeTarget(primaryPort, primarySlug)}: ${errorMessage(err)}`,
         );
       }
+    } else {
+      log({
+        timestamp: now(),
+        level: "info",
+        message: "No public endpoint configured; skipping cloud public exposure.\n",
+      });
     }
 
     return {
@@ -1350,59 +1442,75 @@ fi`;
       `Deploying static site from workspace ${workspaceId}, output path ${outputPath}...`,
     );
 
-    const slug =
-      config.slug ??
-      `${config.projectId.slice(0, 20)}-${config.deploymentId.slice(0, 8)}`
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, "-");
+    const primaryEndpoint = primaryPublicEndpoint(config);
+    const primarySlug = endpointSlug(primaryEndpoint);
+    const primaryCustomDomain = endpointCustomDomain(primaryEndpoint);
+    const pageSlug = primarySlug ?? fallbackRuntimeName(config);
 
     let page: { slug: string; url?: string | null };
 
-    if (config.customDomain) {
+    if (primaryCustomDomain) {
       // Deploy with custom domain only — no free subdomain
       let pg: { slug: string; url?: string | null };
       try {
         const result = await this.client.pages.create({
           workspace_id: workspaceId,
           path: outputPath,
-          name: config.projectName ?? slug,
-          slug,
+          name: config.projectName ?? pageSlug,
+          slug: pageSlug,
         });
         pg = result.page;
       } catch (err) {
         throw new Error(
-          `Failed to create static page for slug "${slug}" with custom domain "${config.customDomain}": ${errorMessage(err)}`,
+          `Failed to create static page for slug "${pageSlug}" with custom domain "${primaryCustomDomain}": ${errorMessage(err)}`,
         );
       }
 
       await this.client.pages
         .connectDomain(pg.slug, {
-          domain: config.customDomain,
+          domain: primaryCustomDomain,
         })
         .catch(() => {
           // Non-fatal: page can still be accessed via slug if domain isn't verified yet
         });
 
-      page = { ...pg, url: pg.url ?? `https://${config.customDomain}` };
-    } else {
+      page = { ...pg, url: pg.url ?? `https://${primaryCustomDomain}` };
+    } else if (primarySlug) {
       // Deploy with free subdomain (slug.opsh.io)
       let pg: { slug: string; url?: string | null };
       try {
         const result = await this.client.pages.create({
           workspace_id: workspaceId,
           path: outputPath,
-          name: config.projectName ?? slug,
-          slug,
+          name: config.projectName ?? pageSlug,
+          slug: pageSlug,
           domain: "opsh.io",
         });
         pg = result.page;
       } catch (err) {
         throw new Error(
-          `Failed to create static page for slug "${slug}" (${slug}.opsh.io): ${errorMessage(err)}`,
+          `Failed to create static page for slug "${pageSlug}" (${pageSlug}.opsh.io): ${errorMessage(err)}`,
         );
       }
 
       page = pg;
+    } else {
+      let pg: { slug: string; url?: string | null };
+      try {
+        const result = await this.client.pages.create({
+          workspace_id: workspaceId,
+          path: outputPath,
+          name: config.projectName ?? pageSlug,
+          slug: pageSlug,
+        });
+        pg = result.page;
+      } catch (err) {
+        throw new Error(
+          `Failed to create static page for slug "${pageSlug}": ${errorMessage(err)}`,
+        );
+      }
+
+      page = { ...pg, url: undefined };
     }
 
     // // 3. Delete the workspace — page lives independently on the edge
@@ -1449,6 +1557,7 @@ fi`;
       await this.client.pages.delete(containerId.slice(5));
     } else {
       await this.ws(containerId).delete();
+      this.builtArtifacts.delete(containerId);
     }
   }
 

@@ -13,10 +13,12 @@ import {
   getGitHubAuthMode,
 } from "./github.auth";
 import { getLocalGhStatus } from "./github.local-auth";
+import { isIgnoredRepoPath } from "../../lib/project-root-detector";
 import type {
   GitHubRepository,
   GitHubBranch,
   GitHubFileContent,
+  GitHubTreeResponse,
   GitHubWebhook,
   MappedRepository,
   MappedAccount,
@@ -25,6 +27,49 @@ import type {
 import { env, runtimeTarget } from "../../config/env";
 
 export const GITHUB_DEPLOY_WEBHOOK_EVENTS = ["push"] as const;
+const MAX_FALLBACK_TREE_ENTRIES = 5000;
+
+async function listRepositoryTreeViaContents(
+  userId: string,
+  owner: string,
+  repo: string,
+  opts: { branch?: string } = {},
+): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+  const tree: Array<{ path: string; type: "file" | "dir" }> = [];
+  const visited = new Set<string>();
+  const queue = [""];
+
+  while (queue.length > 0) {
+    const currentPath = queue.shift() ?? "";
+    if (visited.has(currentPath) || isIgnoredRepoPath(currentPath)) {
+      continue;
+    }
+
+    visited.add(currentPath);
+    const entries = await listFiles(userId, owner, repo, {
+      ...opts,
+      ...(currentPath ? { path: currentPath } : {}),
+    }).catch(() => [] as GitHubFileContent[]);
+
+    for (const entry of entries) {
+      const entryType: "file" | "dir" = entry.type === "dir" ? "dir" : "file";
+      tree.push({
+        path: entry.path,
+        type: entryType,
+      });
+
+      if (tree.length >= MAX_FALLBACK_TREE_ENTRIES) {
+        return tree;
+      }
+
+      if (entry.type === "dir" && !isIgnoredRepoPath(entry.path)) {
+        queue.push(entry.path);
+      }
+    }
+  }
+
+  return tree;
+}
 
 // ─── Repository mapping ─────────────────────────────────────────────────────
 
@@ -299,6 +344,38 @@ export async function listFiles(
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filePath}`,
     params: opts.branch ? { ref: opts.branch } : undefined,
   });
+}
+
+/**
+ * List the full repository tree recursively.
+ */
+export async function listRepositoryTree(
+  userId: string,
+  owner: string,
+  repo: string,
+  opts: { branch?: string } = {},
+): Promise<Array<{ path: string; type: "file" | "dir" }>> {
+  const ref = opts.branch?.trim() || "HEAD";
+  const data = await githubFetch<GitHubTreeResponse>({
+    userId,
+    owner,
+    url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}`,
+    params: { recursive: 1 },
+  });
+
+  const tree: Array<{ path: string; type: "file" | "dir" }> = (data.tree ?? [])
+    .filter((entry) => entry.type === "blob" || entry.type === "tree")
+    .map((entry) => ({
+      path: entry.path,
+      type: entry.type === "tree" ? "dir" : "file",
+    }));
+
+  if (!data.truncated) {
+    return tree;
+  }
+
+  const fallbackTree = await listRepositoryTreeViaContents(userId, owner, repo, opts).catch(() => tree);
+  return fallbackTree.length > 0 ? fallbackTree : tree;
 }
 
 /**

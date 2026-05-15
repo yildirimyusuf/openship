@@ -1,0 +1,126 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ConflictError } from "@repo/core";
+
+const domainRepo = vi.hoisted(() => ({
+  update: vi.fn(),
+  create: vi.fn(),
+  remove: vi.fn(),
+  listByProject: vi.fn(),
+  findByHostname: vi.fn(),
+}));
+
+vi.mock("@repo/db", () => ({
+  repos: {
+    domain: domainRepo,
+  },
+}));
+
+import { getRoutingBaseDomain } from "../../src/lib/routing-domains";
+import { syncProjectPublicRoutes } from "../../src/lib/project-route-store";
+
+describe("syncProjectPublicRoutes", () => {
+  beforeEach(() => {
+    domainRepo.update.mockReset();
+    domainRepo.create.mockReset();
+    domainRepo.remove.mockReset();
+    domainRepo.listByProject.mockReset();
+    domainRepo.findByHostname.mockReset();
+    domainRepo.create.mockImplementation(async (data: any) => ({
+      id: "dom_created",
+      ...data,
+    }));
+  });
+
+  it("reuses an existing service-scoped hostname when switching to project-level routing", async () => {
+    const hostname = `business-servio.${getRoutingBaseDomain()}`;
+
+    await syncProjectPublicRoutes({
+      projectId: "proj_123",
+      endpoints: [{
+        port: 7000,
+        domain: "business-servio",
+        domainType: "free",
+      }],
+      currentDomains: [{
+        id: "dom_service",
+        projectId: "proj_123",
+        serviceId: "svc_business",
+        hostname,
+        targetPort: 7000,
+        targetPath: null,
+        domainType: "free",
+        isPrimary: false,
+        verified: true,
+        status: "active",
+      } as any],
+    });
+
+    expect(domainRepo.create).not.toHaveBeenCalled();
+    expect(domainRepo.remove).not.toHaveBeenCalled();
+    expect(domainRepo.update).toHaveBeenCalledWith("dom_service", {
+      serviceId: null,
+      isPrimary: true,
+    });
+  });
+
+  it("dedupes repeated hostnames from the desired endpoint list", async () => {
+    const hostname = `business-servio.${getRoutingBaseDomain()}`;
+
+    await syncProjectPublicRoutes({
+      projectId: "proj_123",
+      endpoints: [
+        {
+          port: 7000,
+          domain: "business-servio",
+          domainType: "free",
+        },
+        {
+          port: 7000,
+          domain: "business-servio",
+          domainType: "free",
+        },
+      ],
+      currentDomains: [],
+    });
+
+    expect(domainRepo.create).toHaveBeenCalledTimes(1);
+    expect(domainRepo.create).toHaveBeenCalledWith(expect.objectContaining({
+      hostname,
+      serviceId: null,
+      targetPort: 7000,
+      isPrimary: true,
+    }));
+    expect(domainRepo.update).not.toHaveBeenCalled();
+    expect(domainRepo.remove).not.toHaveBeenCalled();
+  });
+
+  it("throws a conflict when the hostname already belongs to another project", async () => {
+    const hostname = `business-servio.${getRoutingBaseDomain()}`;
+    domainRepo.findByHostname.mockResolvedValue({
+      id: "dom_other",
+      projectId: "proj_other",
+      serviceId: null,
+      hostname,
+      targetPort: 7000,
+      targetPath: null,
+      domainType: "free",
+      isPrimary: true,
+      verified: true,
+      status: "active",
+    });
+
+    await expect(syncProjectPublicRoutes({
+      projectId: "proj_123",
+      endpoints: [{
+        port: 7000,
+        domain: "business-servio",
+        domainType: "free",
+      }],
+      currentDomains: [],
+    })).rejects.toBeInstanceOf(ConflictError);
+
+    expect(domainRepo.create).not.toHaveBeenCalled();
+    expect(domainRepo.update).not.toHaveBeenCalled();
+    expect(domainRepo.remove).not.toHaveBeenCalled();
+  });
+});

@@ -1,11 +1,15 @@
 import React, { useCallback } from "react";
-import { GitBranch, Rocket, Github, Loader2, Globe, Container, Server, Layers, Check, AlertCircle, Key } from "lucide-react";
+import { GitBranch, Rocket, Github, Loader2, Globe, Container, Server, Layers, Check, AlertCircle, Key, Plus } from "lucide-react";
 import { CustomSelect } from "@/components/ui/CustomSelect";
 import DomainSettings from "./DomainSettings";
 import BuildSummary from "./BuildSummary";
 import RuntimeModeModalContent from "./RuntimeModeModalContent";
 import { useDeployment } from "@/context/DeploymentContext";
-import { servicesNeedCloud } from "@/context/deployment/types";
+import {
+  publicEndpointsNeedCloud,
+  servicesNeedCloud,
+  usesServiceDeployment,
+} from "@/context/deployment/types";
 import { useCloud } from "@/context/CloudContext";
 import { canUseCloudConnection, usePlatform } from "@/context/PlatformContext";
 import { useModal } from "@/context/ModalContext";
@@ -135,9 +139,20 @@ const Sidebar: React.FC = () => {
   const { baseDomain, selfHosted, deployMode } = usePlatform();
   const { showModal, hideModal } = useModal();
   const router = useRouter();
-  const isServices = config.projectType === "services";
-  const isDockerRuntimeProject = config.projectType === "docker" || config.projectType === "services";
+  const isServices = usesServiceDeployment(config);
+  const isDockerRuntimeProject = config.projectType === "docker" || isServices;
   const canConnectCloud = canUseCloudConnection({ selfHosted, deployMode });
+
+  const handleOpenEnvironmentCreator = useCallback(() => {
+    if (!config.projectId) return;
+
+    const params = new URLSearchParams({ createEnvironment: "1" });
+    if (config.branch) {
+      params.set("branch", config.branch);
+    }
+
+    router.push(`/projects/${config.projectId}?${params.toString()}`);
+  }, [config.branch, config.projectId, router]);
 
   // Self-hosted server apps need a runtime mode choice before deploying
   const needsRuntimeChoice =
@@ -182,7 +197,12 @@ const Sidebar: React.FC = () => {
       if (!requireCloud("Deploying to Openship Cloud")) return;
     }
 
-    if (!isServices && canConnectCloud && config.deployTarget !== "cloud" && config.domainType === "free") {
+    if (
+      !isServices &&
+      canConnectCloud &&
+      config.deployTarget !== "cloud" &&
+      publicEndpointsNeedCloud(config.publicEndpoints)
+    ) {
       if (!requireCloud({
         feature: `Using free .${baseDomain} domains on your own server`,
         description: `Free .${baseDomain} domains are routed through Openship Cloud. To deploy this project to your own server, either connect Openship Cloud or switch this project to a custom domain.`,
@@ -248,7 +268,7 @@ const Sidebar: React.FC = () => {
     }
 
     await continueDeploy();
-  }, [baseDomain, canConnectCloud, config.deployTarget, config.domainType, config.services, continueDeploy, hideModal, isServices, requireCloud, showModal]);
+  }, [baseDomain, canConnectCloud, config.deployTarget, config.publicEndpoints, config.services, continueDeploy, hideModal, isServices, requireCloud, showModal]);
 
   return (
     <div className="lg:sticky lg:top-6 h-fit space-y-4">
@@ -278,6 +298,13 @@ const Sidebar: React.FC = () => {
                   label: branch,
                   icon: <GitBranch className="w-3.5 h-3.5" />
                 }))}
+                footerAction={config.projectId
+                  ? {
+                      label: "New environment",
+                      icon: <Plus className="w-3.5 h-3.5 text-muted-foreground" />,
+                      onClick: handleOpenEnvironmentCreator,
+                    }
+                  : undefined}
                 placeholder="Select branch"
                 className="w-full"
               />
@@ -297,13 +324,22 @@ const Sidebar: React.FC = () => {
         <ComposeChecklist />
       ) : (
         <DomainSettings
+          projectId={config.projectId}
           projectName={config.projectName}
-          domain={config.domain}
-          setDomain={(val) => updateConfig({ domain: val })}
-          customDomain={config.customDomain}
-          setCustomDomain={(val) => updateConfig({ customDomain: val })}
-          domainType={config.domainType}
-          setDomainType={(val) => updateConfig({ domainType: val })}
+          endpoints={config.publicEndpoints}
+          hasServer={config.options.hasServer}
+          runtimePort={config.options.productionPort}
+          setEndpoints={(publicEndpoints, nextRuntimePort) => updateConfig({
+            publicEndpoints,
+            ...(nextRuntimePort !== undefined
+              ? {
+                  options: {
+                    ...config.options,
+                    productionPort: nextRuntimePort,
+                  },
+                }
+              : {}),
+          })}
         />
       )}
 

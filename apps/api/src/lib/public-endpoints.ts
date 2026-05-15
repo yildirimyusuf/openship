@@ -1,0 +1,341 @@
+import type { Domain } from "@repo/db";
+import { getRoutingBaseDomain } from "./routing-domains";
+
+export interface StoredPublicEndpoint {
+  port?: number;
+  targetPath?: string;
+  domain?: string;
+  customDomain?: string;
+  domainType: "free" | "custom";
+}
+
+type StoredPublicEndpointInput = {
+  port?: number | string | null;
+  targetPath?: string | null;
+  domain?: string | null;
+  customDomain?: string | null;
+  domainType?: "free" | "custom" | null;
+};
+
+type ProjectDomainRow = Pick<
+  Domain,
+  "hostname" | "isPrimary" | "verified" | "serviceId" | "targetPort" | "targetPath" | "domainType"
+>;
+
+function normalizePort(port: number | string | null | undefined): number | null {
+  const numericPort = typeof port === "string" ? Number(port) : port;
+  if (!Number.isFinite(numericPort)) return null;
+  if (numericPort! < 1 || numericPort! > 65535) return null;
+  return numericPort!;
+}
+
+function normalizeSlug(slug: string | null | undefined): string | undefined {
+  const normalized = slug?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+function normalizeCustomDomain(domain: string | null | undefined): string | undefined {
+  const normalized = domain?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+export function normalizeTargetPath(targetPath: string | null | undefined): string | undefined {
+  const normalized = targetPath?.trim().replace(/\\/g, "/");
+  if (!normalized) return undefined;
+
+  const segments = normalized
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.some((segment) => segment === "..")) {
+    return undefined;
+  }
+
+  const cleanSegments = segments.filter((segment) => segment !== ".");
+  return cleanSegments.length > 0 ? `/${cleanSegments.join("/")}` : "/";
+}
+
+function managedHostnameSuffix(): string {
+  return `.${getRoutingBaseDomain().trim().toLowerCase()}`;
+}
+
+function managedHostnameToSlug(hostname: string): string | undefined {
+  const normalized = normalizeCustomDomain(hostname);
+  const suffix = managedHostnameSuffix();
+  if (!normalized?.endsWith(suffix)) return undefined;
+
+  const slug = normalized.slice(0, -suffix.length);
+  return slug || undefined;
+}
+
+export function inferPublicRouteDomainType(
+  hostname: string,
+  explicit?: string | null,
+): "free" | "custom" {
+  if (explicit === "free" || explicit === "custom") {
+    return explicit;
+  }
+
+  return managedHostnameToSlug(hostname) ? "free" : "custom";
+}
+
+export function publicEndpointHostname(
+  endpoint: Pick<StoredPublicEndpoint, "domainType" | "domain" | "customDomain">,
+): string | undefined {
+  if (endpoint.domainType === "custom") {
+    return normalizeCustomDomain(endpoint.customDomain);
+  }
+
+  const slug = normalizeSlug(endpoint.domain);
+  return slug ? `${slug}${managedHostnameSuffix()}` : undefined;
+}
+
+function routeRowsToPublicEndpoints(
+  projectDomains: ProjectDomainRow[] | null | undefined,
+): StoredPublicEndpoint[] {
+  const projectLevelDomains = (projectDomains ?? [])
+    .filter((domain) => !domain.serviceId)
+    .sort((left, right) => {
+      if (left.isPrimary !== right.isPrimary) {
+        return left.isPrimary ? -1 : 1;
+      }
+
+      return left.hostname.localeCompare(right.hostname);
+    });
+
+  const endpoints: Array<StoredPublicEndpoint | null> = projectLevelDomains
+    .map((domain) => {
+      const hostname = normalizeCustomDomain(domain.hostname);
+      if (!hostname) return null;
+
+      const port = normalizePort(domain.targetPort) ?? undefined;
+      const targetPath = normalizeTargetPath(domain.targetPath);
+      const domainType = inferPublicRouteDomainType(hostname, domain.domainType);
+
+      if ((port !== undefined) === Boolean(targetPath)) {
+        return null;
+      }
+
+      if (domainType === "free") {
+        const slug = managedHostnameToSlug(hostname);
+        if (!slug) return null;
+
+        return {
+          ...(port !== undefined ? { port } : {}),
+          ...(targetPath ? { targetPath } : {}),
+          domain: slug,
+          domainType,
+        } satisfies StoredPublicEndpoint;
+      }
+
+      return {
+        ...(port !== undefined ? { port } : {}),
+        ...(targetPath ? { targetPath } : {}),
+        customDomain: hostname,
+        domainType,
+      } satisfies StoredPublicEndpoint;
+    });
+
+  return endpoints.filter((endpoint): endpoint is StoredPublicEndpoint => endpoint !== null);
+}
+
+function primaryProjectDomain(projectDomains?: ProjectDomainRow[] | null): string | undefined {
+  const projectLevelDomains = (projectDomains ?? []).filter(
+    (domain) => !domain.serviceId && inferPublicRouteDomainType(domain.hostname, domain.domainType) === "custom",
+  );
+  const primaryDomain = projectLevelDomains.find((domain) => domain.isPrimary)
+    ?? projectLevelDomains.find((domain) => domain.verified)
+    ?? projectLevelDomains[0];
+
+  return normalizeCustomDomain(primaryDomain?.hostname);
+}
+
+interface NormalizeStoredPublicEndpointsOptions {
+  primaryFreeDomainFallback?: string;
+}
+
+function normalizeStoredPublicEndpoint(
+  endpoint: StoredPublicEndpointInput,
+  opts?: { freeDomainFallback?: string },
+): StoredPublicEndpoint | null {
+  const port = normalizePort(endpoint.port);
+  const targetPath = normalizeTargetPath(endpoint.targetPath);
+  const domainType = endpoint.domainType === "custom" ? "custom" : "free";
+  const domain = domainType === "free"
+    ? normalizeSlug(endpoint.domain ?? opts?.freeDomainFallback)
+    : undefined;
+  const customDomain = domainType === "custom"
+    ? normalizeCustomDomain(endpoint.customDomain)
+    : undefined;
+  const hasPortTarget = port !== null;
+  const hasPathTarget = Boolean(targetPath);
+
+  if (domainType === "free" && !domain) return null;
+  if (domainType === "custom" && !customDomain) return null;
+  if (hasPortTarget === hasPathTarget) return null;
+
+  return {
+    ...(port !== null ? { port } : {}),
+    ...(targetPath ? { targetPath } : {}),
+    domain,
+    customDomain,
+    domainType,
+  } satisfies StoredPublicEndpoint;
+}
+
+export function normalizeStoredPublicEndpoints(
+  endpoints?: StoredPublicEndpointInput[] | null,
+  opts?: NormalizeStoredPublicEndpointsOptions,
+): StoredPublicEndpoint[] {
+  if (!endpoints?.length) return [];
+
+  return endpoints
+    .map((endpoint, index) => normalizeStoredPublicEndpoint(
+      endpoint,
+      index === 0 && opts?.primaryFreeDomainFallback
+        ? { freeDomainFallback: opts.primaryFreeDomainFallback }
+        : undefined,
+    ))
+    .filter(
+    (endpoint): endpoint is StoredPublicEndpoint => endpoint !== null,
+  );
+}
+
+function alignPrimaryStoredPublicEndpoint(
+  endpoint: StoredPublicEndpoint,
+  baseSlug: string,
+  preserveFreeDomain: boolean,
+): StoredPublicEndpoint {
+  if (endpoint.domainType === "custom") {
+    return {
+      ...endpoint,
+      domain: undefined,
+      customDomain: endpoint.customDomain,
+    } satisfies StoredPublicEndpoint;
+  }
+
+  return {
+    ...endpoint,
+    domain: preserveFreeDomain ? (endpoint.domain ?? baseSlug) : baseSlug,
+    customDomain: undefined,
+  } satisfies StoredPublicEndpoint;
+}
+
+export function resolveStoredPublicEndpoints(opts: {
+  stored?: StoredPublicEndpointInput[] | null;
+  slug?: string | null;
+  customDomain?: string | null;
+  projectDomains?: ProjectDomainRow[] | null;
+  targetPort?: number | string | null;
+  targetPath?: string | null;
+}): StoredPublicEndpoint[] {
+  const explicitCustomDomain = normalizeCustomDomain(opts.customDomain);
+  const explicitTargetPort = normalizePort(opts.targetPort);
+  const explicitTargetPath = normalizeTargetPath(opts.targetPath);
+
+  const explicitTarget = (explicitTargetPort !== null) !== Boolean(explicitTargetPath)
+    ? (explicitTargetPort !== null
+        ? { port: explicitTargetPort }
+        : { targetPath: explicitTargetPath! })
+    : null;
+
+  if (explicitCustomDomain) {
+    return explicitTarget
+      ? [{
+          customDomain: explicitCustomDomain,
+          ...explicitTarget,
+          domainType: "custom",
+        } satisfies StoredPublicEndpoint]
+      : [];
+  }
+
+  const routed = routeRowsToPublicEndpoints(opts.projectDomains);
+  if (routed.length > 0) {
+    return routed;
+  }
+
+  const stored = normalizeStoredPublicEndpoints(opts.stored);
+  if (stored.length > 0) {
+    return stored;
+  }
+
+  const primaryCustomDomain = primaryProjectDomain(opts.projectDomains);
+  if (primaryCustomDomain) {
+    return explicitTarget
+      ? [{
+          customDomain: primaryCustomDomain,
+          ...explicitTarget,
+          domainType: "custom",
+        } satisfies StoredPublicEndpoint]
+      : [];
+  }
+
+  if (!explicitTarget) {
+    return [];
+  }
+
+  return [{
+    ...explicitTarget,
+    domain: normalizeSlug(opts.slug) ?? "project",
+    domainType: "free",
+  } satisfies StoredPublicEndpoint];
+}
+
+export function syncStoredPublicEndpoints(opts: {
+  current?: StoredPublicEndpointInput[] | null;
+  next?: StoredPublicEndpointInput[] | null;
+  slug?: string | null;
+  customDomain?: string | null;
+  projectDomains?: ProjectDomainRow[] | null;
+}): {
+  publicEndpoints: StoredPublicEndpoint[];
+  slug: string;
+} {
+  const baseSlug = normalizeSlug(opts.slug) ?? "project";
+  const nextProvided = opts.next !== undefined;
+
+  let publicEndpoints = nextProvided
+    ? normalizeStoredPublicEndpoints(opts.next, {
+        primaryFreeDomainFallback: baseSlug,
+      })
+    : resolveStoredPublicEndpoints({
+        stored: opts.current,
+        slug: baseSlug,
+        customDomain: opts.customDomain,
+        projectDomains: opts.projectDomains,
+      });
+
+  if (!nextProvided && publicEndpoints.length === 0) {
+    publicEndpoints = resolveStoredPublicEndpoints({
+      slug: baseSlug,
+      customDomain: opts.customDomain,
+      projectDomains: opts.projectDomains,
+    });
+  }
+
+  if (publicEndpoints.length === 0) {
+    return {
+      publicEndpoints: [],
+      slug: baseSlug,
+    };
+  }
+
+  const [firstEndpoint, ...remainingEndpoints] = publicEndpoints;
+  const primaryEndpoint = alignPrimaryStoredPublicEndpoint(
+    firstEndpoint,
+    baseSlug,
+    nextProvided || opts.slug === undefined,
+  );
+
+  return {
+    publicEndpoints: [primaryEndpoint, ...remainingEndpoints],
+    slug: primaryEndpoint.domainType === "free" ? (primaryEndpoint.domain ?? baseSlug) : baseSlug,
+  };
+}
+
+export function storedPublicEndpointsNeedCloud(
+  endpoints?: Array<Pick<StoredPublicEndpoint, "domainType">> | null,
+): boolean {
+  return (endpoints ?? []).some((endpoint) => endpoint.domainType !== "custom");
+}

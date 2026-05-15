@@ -11,6 +11,7 @@ import Sidebar from "./components/Sidebar";
 import DeployTargetStep, { DeployTargetSummary, useDesktopTargets } from "./components/DeployTargetStep";
 import { decodeSlug } from "@/utils/repoSlug";
 import { useDeployment } from "@/context/DeploymentContext";
+import { usesServiceDeployment } from "@/context/deployment/types";
 import { usePlatform } from "@/context/PlatformContext";
 import SkeletonLoader from "./components/SkeletonLoader";
 import ErrorState from "@/components/shared/ErrorState";
@@ -145,6 +146,9 @@ const DeployRepository: React.FC = () => {
         return null;
     }
 
+    const isServiceDeployment = usesServiceDeployment(config);
+    const isSingleAppFlow = config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment);
+
     return (
         <PageContainer>
                 {/* Step 1: Deploy target picker — centered onboarding style (desktop only) */}
@@ -165,7 +169,7 @@ const DeployRepository: React.FC = () => {
                                 <DeployTargetSummary
                                     deployTarget={config.deployTarget}
                                     buildStrategy={config.buildStrategy}
-                                                                        showBuildStrategy={config.projectType === "app"}
+                                    showBuildStrategy={isSingleAppFlow}
                                     serverName={
                                       config.serverId
                                         ? (targets.servers.find((s) => s.id === config.serverId)?.name ??
@@ -194,8 +198,8 @@ const DeployRepository: React.FC = () => {
                                 <ComposeServices />
                             )}
 
-                            {/* Global env vars — app & docker only (compose owns its shared env inside the services card) */}
-                            {config.projectType !== "services" && (
+                            {/* Global env vars — service-stack mode owns shared env inside the services card */}
+                            {!isServiceDeployment && (
                                 <EnvironmentVariables />
                             )}
                             <ProjectName />

@@ -9,8 +9,7 @@ import React, {
   useRef,
   useMemo,
 } from "react";
-import { api, endpoints, projectsApi } from "@/lib/api";
-import { getProjectType } from "@repo/core";
+import { api, endpoints, projectsApi, servicesApi, type Service } from "@/lib/api";
 
 interface BasicProjectData {
   name: string;
@@ -126,6 +125,7 @@ interface BuildData {
   installCommand: string;
   startCommand: string;
   productionPort: string;
+  buildImage: string;
   rootDirectory: string;
   hasBuild: boolean;
   hasServer: boolean;
@@ -143,6 +143,12 @@ interface TerminalLogsData {
 interface ServerLogsData {
   logs: any[];
   mockInterval: NodeJS.Timeout | null;
+}
+
+interface ServicesData {
+  services: Service[];
+  isLoading: boolean;
+  error: string | null;
 }
 
 interface ProjectSettingsContextType {
@@ -193,6 +199,11 @@ interface ProjectSettingsContextType {
   setServerLogs: (logs: any[]) => void;
   clearServerLogs: () => void;
   setServerMockInterval: (interval: NodeJS.Timeout | null) => void;
+
+  // Services
+  servicesData: ServicesData;
+  refreshServices: () => Promise<Service[]>;
+  hasMultipleServices: boolean;
 
   // Global state
   projectNotFound: boolean;
@@ -344,6 +355,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     installCommand: "bun install",
     startCommand: "npm start",
     productionPort: "3000",
+    buildImage: "node:22",
     rootDirectory: "./",
     hasBuild: true,
     hasServer: true,
@@ -363,6 +375,12 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     mockInterval: null,
   });
 
+  const [servicesData, setServicesData] = useState<ServicesData>({
+    services: [],
+    isLoading: false,
+    error: null,
+  });
+
   const [projectNotFound, setProjectNotFound] = useState(false);
   const [errorType, setErrorType] = useState<
     "project-not-found" | "repo-not-found" | "access-denied" | null
@@ -371,6 +389,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
   const isLoadingAnalyticsRef = useRef<boolean>(false);
   const hasFetchedRef = useRef<boolean>(false);
   const lastFetchedIdRef = useRef<string>("");
+  const hasMultipleServices =
+    projectData.hasMultipleServices === true ||
+    Number(projectData.serviceCount ?? 0) > 1 ||
+    servicesData.services.length > 1;
 
   // Fetch analytics - memoized to prevent recreating on every render
   const refreshAnalytics = useCallback(
@@ -404,6 +426,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
             installCommand: response.data.project.options?.installCommand || "bun install",
             startCommand: response.data.project.options?.startCommand || "npm start",
             productionPort: response.data.project.options?.productionPort || "",
+            buildImage: response.data.project.buildImage || "node:22",
             rootDirectory: response.data.project.options?.rootDirectory || "./",
             hasBuild: response.data.project.options?.hasBuild ?? true,
             hasServer: response.data.project.options?.hasServer ?? true,
@@ -653,6 +676,62 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     // Add your API call here to persist changes
   };
 
+  const servicesRequestRef = useRef<{ projectId: string; promise: Promise<Service[]> } | null>(
+    null,
+  );
+  const servicesRequestIdRef = useRef(0);
+
+  const refreshServices = useCallback(async () => {
+    if (!id || id === "undefined") {
+      servicesRequestIdRef.current += 1;
+      servicesRequestRef.current = null;
+      setServicesData({ services: [], isLoading: false, error: null });
+      return [];
+    }
+
+    if (servicesRequestRef.current?.projectId === id) {
+      return servicesRequestRef.current.promise;
+    }
+
+    const requestId = servicesRequestIdRef.current + 1;
+    servicesRequestIdRef.current = requestId;
+
+    let promise!: Promise<Service[]>;
+    promise = (async () => {
+      setServicesData((prev) => ({ ...prev, isLoading: true, error: null }));
+
+      try {
+        const response = await servicesApi.list(id);
+        const services = response.success ? (response.services ?? []) : [];
+        if (servicesRequestIdRef.current === requestId) {
+          setServicesData({
+            services,
+            isLoading: false,
+            error: response.success ? null : "Failed to load services",
+          });
+        }
+        return services;
+      } catch (error) {
+        console.error("Failed to fetch project services:", error);
+        if (servicesRequestIdRef.current === requestId) {
+          setServicesData({
+            services: [],
+            isLoading: false,
+            error: "Failed to load services",
+          });
+        }
+        return [];
+      } finally {
+        if (servicesRequestRef.current?.promise === promise) {
+          servicesRequestRef.current = null;
+        }
+      }
+    })();
+
+    servicesRequestRef.current = { projectId: id, promise };
+    return promise;
+  }, [id]);
+
   const refreshEnvironments = useCallback(async () => {
     if (!id) return;
     const response = await projectsApi.getEnvironments(id);
@@ -851,46 +930,18 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     return tab || undefined; // let default be set by tab list below
   };
 
-  const isServicesProject = !!(
-    projectData.framework && getProjectType(projectData.framework as any) === "services"
-  );
-  const hasProjectRuntimeLogs =
-    isServicesProject ||
-    projectData.options?.hasServer === true ||
-    projectData.hasServer === true ||
-    (buildData.isLoading ? true : buildData.hasServer === true);
-
   const tabs = useMemo(() => {
-    if (isServicesProject) {
-      return [
-        { id: "services", label: "Services", icon: "layers.png" },
-        { id: "domains", label: "Domains", icon: "server-59-1658435258.png" },
-        { id: "deployments", label: "Deployments", icon: "heart%20rate-118-1658433496.png" },
-        { id: "logs", label: "Logs", icon: "terminal-184-1658431404.png" },
-        { id: "advanced", label: "Advanced", icon: "error%20triangle-81-1658234612.png" },
-      ];
-    }
-
-    const appTabs = [
+    return [
       { id: "overview", label: "Overview", icon: "setting-100-1658432731.png" },
       { id: "services", label: "Services", icon: "layers.png" },
       { id: "domains", label: "Domains", icon: "server-59-1658435258.png" },
       { id: "deployments", label: "Deployments", icon: "heart%20rate-118-1658433496.png" },
       { id: "source", label: "Source", icon: "git%20branch-159-1658431404.png" },
       { id: "runtime", label: "Runtime", icon: "setting-40-1662364403.png" },
+      { id: "logs", label: "Logs", icon: "terminal-184-1658431404.png" },
       { id: "advanced", label: "Advanced", icon: "error%20triangle-81-1658234612.png" },
     ];
-
-    if (hasProjectRuntimeLogs) {
-      appTabs.splice(appTabs.length - 1, 0, {
-        id: "logs",
-        label: "Logs",
-        icon: "terminal-184-1658431404.png",
-      });
-    }
-
-    return appTabs;
-  }, [hasProjectRuntimeLogs, isServicesProject]);
+  }, []);
 
   const defaultTab = tabs[0].id;
   const [activeTab, setActiveTab] = useState(resolveTab(slug?.[0]) || defaultTab);
@@ -899,6 +950,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
   useEffect(() => {
     refreshAnalytics();
   }, [refreshAnalytics]); // refreshAnalytics is memoized with id as dependency
+
+  useEffect(() => {
+    void refreshServices();
+  }, [refreshServices]);
 
   // Sync activeTab with slug changes (for browser back/forward navigation)
   const slugTab = slug?.[0];
@@ -987,6 +1042,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       clearServerLogs,
       setServerMockInterval,
 
+      servicesData,
+      refreshServices,
+      hasMultipleServices,
+
       projectNotFound,
       errorType,
       id,
@@ -1031,6 +1090,9 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       setServerLogs,
       clearServerLogs,
       setServerMockInterval,
+      servicesData,
+      refreshServices,
+      hasMultipleServices,
       projectNotFound,
       errorType,
       id,

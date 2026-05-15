@@ -9,6 +9,14 @@ import { encodeResources } from "../../lib/resources";
 import { normalizeRollbackWindow } from "../../lib/release-retention";
 import { env } from "../../config";
 import { getRepository, listBranches as listGitHubBranches } from "../github/github.service";
+import {
+  deriveEnvironmentPublicEndpoints,
+  deriveNextProjectRouteState,
+  persistProjectRouteState,
+  resolveProjectRouteState,
+  syncProjectRouteState,
+  type ProjectRouteState,
+} from "../domains/project-route.service";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
@@ -102,6 +110,7 @@ function buildProductionProjectInput(
   appId: string,
   data: TCreateProjectBody,
   slug: string,
+  routing: ProjectRouteState,
 ): Omit<NewProject, "id"> {
   const source = resolveProjectSource(data);
 
@@ -140,9 +149,19 @@ function buildProductionProjectInput(
 
 async function createProductionProject(userId: string, data: TCreateProjectBody, slug: string) {
   const { app, created: appCreated } = await ensureProjectApp(userId, data, slug);
+  const routing = deriveNextProjectRouteState({
+    slug,
+  }, {
+    nextPublicEndpoints: data.publicEndpoints,
+    slug,
+  });
 
   try {
-    return await repos.project.create(buildProductionProjectInput(userId, app.id, data, slug));
+    const created = await repos.project.create(
+      buildProductionProjectInput(userId, app.id, data, slug, routing),
+    );
+    await persistProjectRouteState(created.id, routing.publicEndpoints);
+    return created;
   } catch (err) {
     if (appCreated) {
       await repos.projectApp.softDelete(app.id).catch(() => {});
@@ -283,6 +302,17 @@ export async function ensureProject(userId: string, data: EnsureProjectBody) {
         data.rollbackWindow === null ? null : normalizeRollbackWindow(data.rollbackWindow);
     }
 
+    if (
+      data.publicEndpoints !== undefined ||
+      update.slug !== undefined ||
+      update.port !== undefined
+    ) {
+      const routing = await syncProjectRouteState(project, {
+        nextPublicEndpoints: data.publicEndpoints,
+        slug: typeof update.slug === "string" ? update.slug : project.slug,
+      });
+    }
+
     if (Object.keys(update).length > 0) {
       await repos.project.update(project.id, update);
     }
@@ -364,6 +394,17 @@ export async function updateProject(projectId: string, userId: string, data: TUp
   if (data.rollbackWindow !== undefined) {
     update.rollbackWindow =
       data.rollbackWindow === null ? null : normalizeRollbackWindow(data.rollbackWindow);
+  }
+
+  if (
+    data.publicEndpoints !== undefined ||
+    update.slug !== undefined ||
+    update.port !== undefined
+  ) {
+    const routing = await syncProjectRouteState(p, {
+      nextPublicEndpoints: data.publicEndpoints,
+      slug: typeof update.slug === "string" ? update.slug : p.slug,
+    });
   }
 
   await repos.project.update(projectId, update);
@@ -497,6 +538,12 @@ export async function createProjectEnvironment(
     autoDeploy: base.autoDeploy,
   });
 
+  const baseRouteState = await resolveProjectRouteState(base);
+  await persistProjectRouteState(
+    created.id,
+    deriveEnvironmentPublicEndpoints(baseRouteState.publicEndpoints, projectSlug),
+  );
+
   return environmentSummary(created);
 }
 
@@ -564,6 +611,12 @@ export async function updateOptions(
     }
   }
   if (options.hasBuild !== undefined) update.hasBuild = options.hasBuild;
+
+  if (update.port !== undefined) {
+    const routing = await syncProjectRouteState(p, {
+      slug: p.slug,
+    });
+  }
 
   if (Object.keys(update).length > 0) {
     await repos.project.update(projectId, update);

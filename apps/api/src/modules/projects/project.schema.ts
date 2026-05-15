@@ -28,6 +28,16 @@ const EnvironmentSourceModeEnum = Type.Union([
   Type.Literal("manual"),
 ]);
 
+const PublicEndpointSchema = Type.Object({
+  port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
+  targetPath: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+  domain: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 63, pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }),
+  ),
+  customDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+  domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+});
+
 // ─── Route params ────────────────────────────────────────────────────────────
 
 export const ProjectIdParam = Type.Object({
@@ -71,6 +81,7 @@ export const CreateProjectBody = Type.Object({
     Type.Union([Type.Literal("host"), Type.Literal("static"), Type.Literal("standalone")]),
   ),
   port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
+  publicEndpoints: Type.Optional(Type.Array(PublicEndpointSchema, { minItems: 1, maxItems: 20 })),
   hasServer: Type.Optional(Type.Boolean({ default: true })),
   hasBuild: Type.Optional(Type.Boolean({ default: true })),
   rollbackWindow: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),

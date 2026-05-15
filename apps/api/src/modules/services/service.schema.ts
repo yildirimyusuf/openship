@@ -13,11 +13,13 @@ export const ProjectIdParam = Type.Object({
   id: Type.String({ minLength: 1 }),
 });
 
-export const UpdateServiceBody = Type.Object({
+export const CreateServiceBody = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 120 }),
   image: Type.Optional(Type.String({ maxLength: 500 })),
   build: Type.Optional(Type.String({ maxLength: 500 })),
   dockerfile: Type.Optional(Type.String({ maxLength: 500 })),
   ports: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
+  dependsOn: Type.Optional(Type.Array(Type.String({ maxLength: 120 }), { maxItems: 50 })),
   environment: Type.Optional(Type.Record(Type.String(), Type.String())),
   volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
   command: Type.Optional(Type.String({ maxLength: 1000 })),
@@ -25,12 +27,34 @@ export const UpdateServiceBody = Type.Object({
   exposedPort: Type.Optional(Type.String({ maxLength: 50 })),
   domain: Type.Optional(Type.String({ maxLength: 255 })),
   customDomain: Type.Optional(Type.String({ maxLength: 255 })),
-  domainType: Type.Optional(
+  domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+  restart: Type.Optional(
     Type.Union([
-      Type.Literal("free"),
-      Type.Literal("custom"),
+      Type.Literal("no"),
+      Type.Literal("always"),
+      Type.Literal("on-failure"),
+      Type.Literal("unless-stopped"),
     ]),
   ),
+  enabled: Type.Optional(Type.Boolean()),
+  sortOrder: Type.Optional(Type.Number({ minimum: 0 })),
+});
+
+export const UpdateServiceBody = Type.Object({
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+  image: Type.Optional(Type.String({ maxLength: 500 })),
+  build: Type.Optional(Type.String({ maxLength: 500 })),
+  dockerfile: Type.Optional(Type.String({ maxLength: 500 })),
+  ports: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
+  dependsOn: Type.Optional(Type.Array(Type.String({ maxLength: 120 }), { maxItems: 50 })),
+  environment: Type.Optional(Type.Record(Type.String(), Type.String())),
+  volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
+  command: Type.Optional(Type.String({ maxLength: 1000 })),
+  exposed: Type.Optional(Type.Boolean()),
+  exposedPort: Type.Optional(Type.String({ maxLength: 50 })),
+  domain: Type.Optional(Type.String({ maxLength: 255 })),
+  customDomain: Type.Optional(Type.String({ maxLength: 255 })),
+  domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
   restart: Type.Optional(
     Type.Union([
       Type.Literal("no"),
@@ -59,5 +83,6 @@ export const SetServiceEnvVarsBody = Type.Object({
   ),
 });
 
+export type TCreateServiceBody = Static<typeof CreateServiceBody>;
 export type TUpdateServiceBody = Static<typeof UpdateServiceBody>;
 export type TSetServiceEnvVarsBody = Static<typeof SetServiceEnvVarsBody>;

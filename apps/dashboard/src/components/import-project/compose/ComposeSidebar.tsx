@@ -3,7 +3,7 @@
 import React, { useState, useEffect, memo } from "react";
 import { Clock, Container } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
-import type { DeploymentStatus } from "@/context/deployment/types";
+import { resolveBuildElapsedMs, type DeploymentStatus } from "@/context/deployment/types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -42,28 +42,19 @@ const ComposeSidebar: React.FC = () => {
 
   // ── Build timer ──────────────────────────────────────────────────────
   const [elapsed, setElapsed] = useState<number>(() => {
-    if (state.buildDurationMs) return Math.round(state.buildDurationMs / 1000);
-    if (state.buildStartedAt) {
-      return Math.max(0, Math.round((Date.now() - new Date(state.buildStartedAt).getTime()) / 1000));
-    }
-    return 0;
+    return Math.round(resolveBuildElapsedMs(state) / 1000);
   });
 
-  // Sync elapsed time when buildStartedAt arrives from API (e.g. after refresh)
-  // Reset to 0 when buildStartedAt is cleared (redeploy)
   useEffect(() => {
-    if (!state.buildStartedAt) {
-      setElapsed(0);
-    } else if (!state.deploymentSuccess && !state.deploymentFailed && !state.deploymentCanceled) {
-      setElapsed(Math.max(0, Math.round((Date.now() - new Date(state.buildStartedAt).getTime()) / 1000)));
-    }
-  }, [state.buildStartedAt, state.deploymentSuccess, state.deploymentFailed, state.deploymentCanceled]);
-
-  useEffect(() => {
-    if (state.buildDurationMs && (state.deploymentSuccess || state.deploymentFailed || state.deploymentCanceled)) {
-      setElapsed(Math.round(state.buildDurationMs / 1000));
-    }
-  }, [state.buildDurationMs, state.deploymentSuccess, state.deploymentFailed, state.deploymentCanceled]);
+    setElapsed(Math.round(resolveBuildElapsedMs(state) / 1000));
+  }, [
+    state.buildDurationMs,
+    state.buildStartedAt,
+    state.buildRetryCarryMs,
+    state.deploymentSuccess,
+    state.deploymentFailed,
+    state.deploymentCanceled,
+  ]);
 
   useEffect(() => {
     if (state.deploymentSuccess || state.deploymentFailed || state.deploymentCanceled) return;

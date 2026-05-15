@@ -2,7 +2,9 @@
  * Build service — build session lifecycle + build→deploy pipeline.
  */
 
-import { repos, type Project, type Deployment } from "@repo/db";
+import { posix as pathPosix } from "node:path";
+
+import { repos, type Project, type Deployment, type Domain } from "@repo/db";
 import {
   AppError,
   NotFoundError,
@@ -47,17 +49,28 @@ import {
   ensureRouteDomainRecord,
   toRoutedDomainInputs,
 } from "../../lib/routing-domains";
+import { normalizeTargetPath } from "../../lib/public-endpoints";
 import { withDefaults } from "../../lib/resources";
 import { getInstallationToken, resolveToken } from "../github/github.auth";
 import { getLatestCommit, getRepository } from "../github/github.service";
 import { pruneRetainedBareReleases } from "./release-retention";
 import * as sessionManager from "./session-manager";
-import { onFailure, onSuccess, onCancelled, type LifecycleContext } from "./deployment-lifecycle";
+import { cleanupBuildArtifact, onFailure, onSuccess, onCancelled, type LifecycleContext } from "./deployment-lifecycle";
 import { runPreflightChecks, type PreflightResult } from "./preflight";
 import { createBuildConfig } from "./build-config";
-import { isComposeProject, executeComposePipeline } from "./compose";
+import {
+  executeComposePipeline,
+  isLegacyComposeProject,
+  resolveProjectServicePreflightServices,
+  shouldUseProjectServicePipeline,
+} from "./compose";
 import * as settingsService from "../settings/settings.service";
 import type { ComposeService } from "../../lib/compose-parser";
+import {
+  listProjectRouteRows,
+  resolveProjectRouteState,
+  syncProjectRouteState,
+} from "../domains/project-route.service";
 
 // ─── Terminal output collapsing ──────────────────────────────────────────────
 
@@ -233,12 +246,6 @@ export interface DeploymentConfigSnapshot {
   hasServer: boolean;
   /** Whether the project needs a build step (false = deploy source directly) */
   hasBuild: boolean;
-  /** Custom domain from deploy input (e.g. "app.example.com") */
-  customDomain?: string;
-  /** Free subdomain slug captured when the deployment is created. */
-  domain?: string;
-  /** Domain mode captured when the deployment is created. */
-  domainType?: "free" | "custom";
   /** Absolute path to a local project directory (alternative to repoUrl) */
   localPath?: string;
   /** Build strategy: "server" (build in workspace) or "local" (build on host) */
@@ -249,6 +256,8 @@ export interface DeploymentConfigSnapshot {
   serverId?: string;
   /** Runtime mode: "bare" (direct process) or "docker" (container-based) */
   runtimeMode?: "bare" | "docker";
+  /** Project services fan-out mode captured for this deployment. */
+  serviceDeploymentMode?: "services" | "single";
   /** Parsed compose services captured at deploy request time. */
   composeServices?: ComposeService[];
   /** Summary of a compose deployment fan-out, when applicable. */
@@ -267,11 +276,18 @@ export interface BuildAccessInput {
   branch?: string;
   environment?: string;
   envVars?: Record<string, string>;
-  customDomain?: string;
+  publicEndpoints?: Array<{
+    port?: string;
+    targetPath?: string;
+    domain?: string;
+    customDomain?: string;
+    domainType?: "free" | "custom";
+  }>;
   buildStrategy?: BuildStrategy;
   deployTarget?: DeployTarget;
   serverId?: string;
   runtimeMode?: "bare" | "docker";
+  serviceDeploymentMode?: "services" | "single";
   services?: ComposeService[];
 }
 
@@ -282,7 +298,6 @@ export interface BuildAccessInput {
 function buildConfigSnapshot(
   project: Project,
   branch?: string,
-  customDomain?: string,
 ): DeploymentConfigSnapshot {
   const runtimeImage = resolveRuntimeImage(project);
 
@@ -298,21 +313,14 @@ function buildConfigSnapshot(
     outputDirectory: project.outputDirectory!,
     productionPaths: parseProductionPaths(project.productionPaths, project.framework),
     rootDirectory: project.rootDirectory || "",
-    port: project.port!,
+    port: project.port ?? 3000,
     startCommand: project.startCommand!,
     resources: (project.resources as ResourceConfig) || null,
     buildResources: (project.buildResources as ResourceConfig) || null,
     hasServer: project.hasServer ?? !!project.startCommand?.trim(),
     hasBuild: project.hasBuild ?? true,
-    customDomain: customDomain || undefined,
-    domain: project.slug,
-    domainType: customDomain ? "custom" : "free",
     localPath: project.localPath || undefined,
   };
-}
-
-function snapshotSlug(snapshot: DeploymentConfigSnapshot, project: Project) {
-  return snapshot.domain || project.slug;
 }
 
 async function resolveLatestCommitInfo(userId: string, project: Project, branch: string) {
@@ -364,6 +372,19 @@ function parseProductionPaths(
     return paths.productionPaths ? [...paths.productionPaths] : [];
   }
   return [];
+}
+
+function resolveStaticOutputDirectory(outputDirectory: string, targetPath?: string): string {
+  const normalizedTargetPath = normalizeTargetPath(targetPath);
+  if (!normalizedTargetPath || normalizedTargetPath === "/") {
+    return outputDirectory;
+  }
+
+  if (!outputDirectory || outputDirectory === ".") {
+    return normalizedTargetPath.slice(1);
+  }
+
+  return pathPosix.join(outputDirectory, normalizedTargetPath.slice(1));
 }
 
 /** Encrypt a plaintext key-value map. Returns null if empty. */
@@ -495,11 +516,12 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
     branch,
     environment,
     envVars,
-    customDomain,
+    publicEndpoints,
     buildStrategy,
     deployTarget,
     serverId,
     runtimeMode,
+    serviceDeploymentMode,
     services,
   } = input;
 
@@ -511,10 +533,45 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
   await checkNoActiveBuild(project.id);
 
   const resolvedBranch = await resolveProjectBranch(userId, project, branch);
-  const snapshot = buildConfigSnapshot(project, resolvedBranch, customDomain);
-  if (services?.length) {
+  const projectDomains = await listProjectRouteRows(project.id);
+  let routeState = await resolveProjectRouteState(project, { projectDomains });
+  const snapshot = buildConfigSnapshot(project, resolvedBranch);
+
+  if (publicEndpoints !== undefined) {
+    const routing = await syncProjectRouteState(project, {
+      projectDomains,
+      nextPublicEndpoints: publicEndpoints,
+      slug: routeState.publicEndpoints.find((endpoint) => endpoint.domainType === "free")?.domain,
+    });
+    routeState = routing;
+  }
+
+  const requestedServiceMode =
+    serviceDeploymentMode === "single"
+      ? "single"
+      : serviceDeploymentMode === "services" || services?.length
+        ? "services"
+        : undefined;
+
+  if (requestedServiceMode) {
+    snapshot.serviceDeploymentMode = requestedServiceMode;
+  }
+  if (requestedServiceMode === "services" && services?.length) {
     snapshot.composeServices = services;
   }
+  const useSingleAppPipeline = snapshot.serviceDeploymentMode === "single";
+  const servicePreflightServices = useSingleAppPipeline
+    ? []
+    : await resolveProjectServicePreflightServices(
+        project.id,
+        snapshot.composeServices,
+      );
+  const useServicePipeline = useSingleAppPipeline
+    ? false
+    : await shouldUseProjectServicePipeline(
+        project,
+        snapshot.composeServices,
+      );
 
   // Resolve effective build strategy via settings service
   snapshot.buildStrategy = await settingsService.resolveStrategy(
@@ -536,10 +593,15 @@ export async function requestBuildAccess(userId: string, input: BuildAccessInput
 
   // ── Preflight: validate config + domain before creating any resources ──
   const preflight = await runPreflightChecks(snapshot, {
-    customDomain: snapshot.customDomain,
-    slug: snapshotSlug(snapshot, project),
+    customDomain: routeState.primaryCustomDomain,
+    slug:
+      routeState.publicEndpoints.length > 0 && routeState.primaryDomainType === "free"
+        ? routeState.primarySlug
+        : undefined,
     userId,
-    composeServices: snapshot.composeServices,
+    publicEndpoints: routeState.publicEndpoints,
+    composeServices: servicePreflightServices,
+    multiService: useServicePipeline,
   });
   if (!preflight.ok) {
     throwPreflightFailure(preflight);
@@ -630,8 +692,9 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
       ? buildSessionRow.status
       : dep.status;
 
-  // Return config from deployment snapshot (self-contained)
+  // Route state is always resolved live from route rows.
   const snapshot = dep.meta as DeploymentConfigSnapshot | null;
+  const routeState = await resolveProjectRouteState(project);
 
   // Derive step progress from persisted log entries when no active session
   let currentStep = 0;
@@ -663,7 +726,22 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
     // For failed/cancelled, keep progress where it stopped
   }
 
-  const projectType = isComposeProject(project)
+  const [deploymentServices, projectServices] = await Promise.all([
+    repos.service.listByDeployment(deploymentId).catch(() => []),
+    repos.service.listByProject(project.id).catch(() => []),
+  ]);
+  const isServiceDeployment =
+    snapshot?.serviceDeploymentMode === "services" ||
+    (
+      snapshot?.serviceDeploymentMode !== "single" &&
+      (
+        !!snapshot?.composeDeployment ||
+        deploymentServices.length > 0 ||
+        projectServices.length > 0 ||
+        isLegacyComposeProject(project)
+      )
+    );
+  const projectType = isServiceDeployment
     ? ("services" as const)
     : snapshot?.runtimeMode === "docker"
       ? ("docker" as const)
@@ -671,10 +749,7 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
 
   const composeData =
     projectType === "services"
-      ? await Promise.all([
-          repos.service.listByDeployment(deploymentId).catch(() => []),
-          repos.service.listByProject(project.id).catch(() => []),
-        ]).then(([deploymentServices, projectServices]) => ({
+      ? {
           composeDeployment: snapshot?.composeDeployment ?? null,
           serviceStatuses: deploymentServices.map((service) => ({
             serviceId: service.serviceId,
@@ -692,7 +767,7 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
               image: service.image,
               build: service.build,
             })),
-        }))
+        }
       : {};
 
   return {
@@ -710,16 +785,21 @@ export async function getBuildSessionStatus(deploymentId: string, userId: string
       projectName: project.name,
       framework: snapshot?.framework || project.framework,
       branch: dep.branch ?? project.gitBranch,
-      domain: snapshot?.domain || project.slug,
-      domainType: snapshot?.domainType || (snapshot?.customDomain ? "custom" : "free"),
-      customDomain: snapshot?.customDomain || "",
+      publicEndpoints: routeState.publicEndpoints.map((endpoint) => ({
+        id: endpoint.id,
+        ...(endpoint.port !== undefined ? { port: String(endpoint.port) } : {}),
+        ...(endpoint.targetPath ? { targetPath: endpoint.targetPath } : {}),
+        domain: endpoint.domain || "",
+        customDomain: endpoint.customDomain || "",
+        domainType: endpoint.domainType || "free",
+      })),
       buildCommand: snapshot?.buildCommand,
       outputDirectory: snapshot?.outputDirectory,
       installCommand: snapshot?.installCommand,
       startCommand: snapshot?.startCommand,
-      productionPort: snapshot?.port ? String(snapshot.port) : undefined,
       rootDirectory: snapshot?.rootDirectory,
       hasServer: snapshot?.hasServer ?? !!snapshot?.startCommand?.trim(),
+      serviceDeploymentMode: snapshot?.serviceDeploymentMode,
     },
     progress,
     currentStep,
@@ -752,21 +832,29 @@ export async function cancelBuildSession(deploymentId: string, userId: string) {
 
   const { runtime } = platform();
   if (dep.status === "building") {
-    await runtime.cancelBuild(dep.id).catch(() => {});
+    if (buildSession) {
+      await runtime.cancelBuild(buildSession.id).catch(() => {});
+    }
+  }
+  if (dep.imageRef) {
+    await cleanupBuildArtifact(runtime, dep.imageRef).catch(() => {});
   }
   if (dep.containerId) {
     await runtime.destroy(dep.containerId).catch(() => {});
   }
 
-  // Mark all pending/building services as failed so UI stops showing spinners
-  const services = await repos.service.listByProject(dep.projectId).catch(() => []);
-  for (const svc of services) {
-    sessionManager.broadcastServiceStatus(dep.id, {
-      serviceName: svc.name,
-      serviceId: svc.id,
-      status: "failed",
-      error: "Deployment cancelled",
-    });
+  const snapshot = dep.meta as DeploymentConfigSnapshot | null;
+  if (snapshot?.serviceDeploymentMode !== "single") {
+    // Mark all pending/building services as failed so UI stops showing spinners
+    const services = await repos.service.listByProject(dep.projectId).catch(() => []);
+    for (const svc of services) {
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "failed",
+        error: "Deployment cancelled",
+      });
+    }
   }
 
   await repos.deployment.updateStatus(dep.id, "cancelled");
@@ -870,11 +958,17 @@ export async function triggerDeployment(
   await checkNoActiveBuild(project.id);
 
   const snapshot = buildConfigSnapshot(project, branch);
+  const routeState = await resolveProjectRouteState(project);
 
   // ── Preflight: validate config before creating any resources ────
   const preflight = await runPreflightChecks(snapshot, {
-    slug: snapshotSlug(snapshot, project),
+    customDomain: routeState.primaryCustomDomain,
+    slug:
+      routeState.publicEndpoints.length > 0 && routeState.primaryDomainType === "free"
+        ? routeState.primarySlug
+        : undefined,
     userId,
+    publicEndpoints: routeState.publicEndpoints,
   });
   if (!preflight.ok) {
     throwPreflightFailure(preflight);
@@ -935,6 +1029,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
   if (!snapshot) {
     throw new Error("Deployment has no config snapshot (meta is empty)");
   }
+  const routeState = await resolveProjectRouteState(project);
 
   const logs: LogEntry[] = [];
   const MAX_LOG_ENTRIES = 50_000;
@@ -1022,7 +1117,14 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       gitToken: gitToken ?? undefined,
     });
 
-    if (isComposeProject(project) && isMultiServiceRuntime(runtime)) {
+    const useServicePipeline = snapshot.serviceDeploymentMode === "single"
+      ? false
+      : await shouldUseProjectServicePipeline(
+          project,
+          snapshot.composeServices,
+        );
+
+    if (useServicePipeline && isMultiServiceRuntime(runtime)) {
       if (snapshot.composeServices?.length) {
         await repos.service.syncFromCompose(project.id, snapshot.composeServices);
       }
@@ -1046,9 +1148,8 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       return;
     }
 
-    if (isComposeProject(project)) {
-      // Compose project on a runtime that doesn't support multi-service yet
-      const msg = `Compose projects are not supported on the "${runtime.name}" runtime yet. Use Docker runtime or deploy as a single app.`;
+    if (useServicePipeline) {
+      const msg = `Project services are not supported on the "${runtime.name}" runtime yet. Use Docker runtime or deploy as a single app.`;
       logger.log(msg, "error");
       await onFailure(ctx, msg);
       return;
@@ -1107,9 +1208,12 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
         envVars: envMap,
         resources: prodResources,
         restartPolicy: "no",
-        slug: snapshotSlug(snapshot, project),
-        customDomain: snapshot.customDomain,
-        outputDirectory: snapshot.outputDirectory,
+        runtimeName: project.slug ?? project.id,
+        publicEndpoints: routeState.publicEndpoints,
+        outputDirectory: resolveStaticOutputDirectory(
+          snapshot.outputDirectory,
+          routeState.publicEndpoints[0]?.targetPath,
+        ),
         projectName: project.name,
       });
 
@@ -1146,7 +1250,8 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
         envVars: envMap,
         resources: prodResources,
         restartPolicy: isStaticSelfHosted ? "no" : "always",
-        slug: snapshotSlug(snapshot, project),
+        runtimeName: project.slug ?? project.id,
+        publicEndpoints: routeState.publicEndpoints,
         outputDirectory: snapshot.outputDirectory,
         productionPaths: snapshot.productionPaths.length ? snapshot.productionPaths : undefined,
       };
@@ -1172,11 +1277,24 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       const plannedDomains = buildProjectRouteDomains({
         project,
         projectDomains,
-        customDomain: snapshot.customDomain,
-        managedSlug: snapshotSlug(snapshot, project),
+        customDomain: routeState.primaryCustomDomain,
+        managedSlug: routeState.publicEndpoints.length > 0 ? routeState.primarySlug : undefined,
+        publicEndpoints: routeState.publicEndpoints,
         runtimeName: runtime.name,
         usesManagedRouting,
       });
+      const activeRouteIds = new Set(
+        routeState.publicEndpoints
+          .map((endpoint) => endpoint.id)
+          .filter((id): id is string => !!id),
+      );
+      const obsoleteProjectDomains = activeRouteIds.size > 0
+        ? projectDomains.filter(
+            (domain) =>
+              !domain.serviceId &&
+              !activeRouteIds.has(domain.id),
+          )
+        : [];
 
       // Persist domain records for any new planned domains (free subdomain, custom domain)
       for (const route of plannedDomains) {
@@ -1214,7 +1332,17 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
               }
 
               if (!isStaticSelfHosted) {
-                await ensurePortAvailable(targetExecutor, cfg.port, logger, promptUser);
+                const ports = Array.from(
+                  new Set((routeState.publicEndpoints.length > 0
+                    ? routeState.publicEndpoints
+                    : [{ port: cfg.port }])
+                    .map((endpoint) => endpoint.port ?? cfg.port)
+                    .filter((port): port is number => Number.isFinite(port))),
+                );
+
+                for (const port of ports) {
+                  await ensurePortAvailable(targetExecutor, port, logger, promptUser);
+                }
               }
             }
           : undefined,
@@ -1248,10 +1376,6 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           : undefined,
       };
 
-      // Attach custom domain from snapshot (passed through from input)
-      if (snapshot.customDomain) {
-        deployConfig.customDomain = snapshot.customDomain;
-      }
       const deploySsl = plannedDomains.some((domain) => domain.provisionSsl)
         ? createTrackedSslProvider(ssl, domainByHostname)
         : ssl;
@@ -1290,6 +1414,20 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
             serverId: snapshot.serverId,
           });
         }
+      }
+
+      for (const domain of obsoleteProjectDomains) {
+        if (routing) {
+          await routing.removeRoute(domain.hostname).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            logger.log(`Warning: failed to remove stale route ${domain.hostname}: ${message}\n`, "warn");
+          });
+        }
+
+        await repos.domain.remove(domain.id).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.log(`Warning: failed to remove stale domain record ${domain.hostname}: ${message}\n`, "warn");
+        });
       }
 
       if (

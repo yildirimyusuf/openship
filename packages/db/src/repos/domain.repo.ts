@@ -1,4 +1,4 @@
-import { eq, and, lt } from "drizzle-orm";
+import { eq, and, lt, inArray } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
 import { domain } from "../schema";
@@ -28,6 +28,23 @@ export function createDomainRepo(db: Database) {
       return db.query.domain.findMany({
         where: eq(domain.projectId, projectId),
       });
+    },
+
+    async listByIds(ids: string[]) {
+      if (ids.length === 0) return [];
+
+      const rows = await db.query.domain.findMany({
+        where: inArray(domain.id, ids),
+      });
+      const order = new Map(ids.map((id, index) => [id, index]));
+      return rows.sort((left, right) => (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0));
+    },
+
+    async update(id: string, data: Partial<NewDomain>) {
+      await db
+        .update(domain)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(domain.id, id));
     },
 
     /** Return the primary domain for a project (or first domain, or null). */
@@ -108,17 +125,11 @@ export function createDomainRepo(db: Database) {
       id: string,
       data: { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date },
     ) {
-      await db
-        .update(domain)
-        .set({ ...data, updatedAt: new Date() })
-        .where(eq(domain.id, id));
+      await this.update(id, data);
     },
 
     async updateStatus(id: string, status: string) {
-      await db
-        .update(domain)
-        .set({ status, updatedAt: new Date() })
-        .where(eq(domain.id, id));
+      await this.update(id, { status });
     },
 
     async remove(id: string) {

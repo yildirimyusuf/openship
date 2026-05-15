@@ -32,6 +32,22 @@ function param(c: Context, name: string): string {
   return val;
 }
 
+function getSetCookieHeaders(headers: Headers): string[] {
+  const responseHeaders = headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+
+  if (typeof responseHeaders.getSetCookie === "function") {
+    const cookies = responseHeaders.getSetCookie();
+    if (cookies.length > 0) {
+      return cookies;
+    }
+  }
+
+  const cookie = headers.get("set-cookie");
+  return cookie ? [cookie] : [];
+}
+
 // ─── Status / Connection ─────────────────────────────────────────────────────
 
 /** GET /github/status — Check if user is connected to GitHub */
@@ -166,28 +182,26 @@ export async function connectRedirect(c: Context) {
       body: {
         provider: "github",
         callbackURL,
+        disableRedirect: true,
       },
       headers: c.req.raw.headers,
       asResponse: true,
     });
 
     if (result instanceof Response) {
-      // better-auth returns a Response with JSON body { url, redirect }
-      // and Set-Cookie headers for the state. We need to:
-      // 1. Read the URL from the JSON body
-      // 2. Copy the Set-Cookie headers
-      // 3. Return a real 302 redirect
-
-      const cookies = result.headers.getSetCookie();
-      
-      // Try to get the redirect URL from the body
+      const cookies = getSetCookieHeaders(result.headers);
       let redirectUrl: string | null = null;
+
+      const locationHeader = result.headers.get("location");
+      if (locationHeader) {
+        redirectUrl = locationHeader;
+      }
+
       try {
         const body = await result.json() as { url?: string };
-        redirectUrl = body?.url ?? null;
+        redirectUrl = redirectUrl ?? body?.url ?? null;
       } catch {
-        // If the response is already a redirect (3xx), use the Location header
-        redirectUrl = result.headers.get("location");
+        // Ignore non-JSON bodies and fall back to headers-only handling.
       }
 
       if (redirectUrl) {

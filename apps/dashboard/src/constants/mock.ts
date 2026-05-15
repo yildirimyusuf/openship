@@ -35,6 +35,8 @@ export interface Project {
   activeDeploymentId?: string | null;
   latestDeploymentId?: string | null;
   latestDeploymentStatus?: string | null;
+  serviceCount?: number;
+  hasMultipleServices?: boolean;
 
   /* ── Hosting info (enriched by API) ─────────────────────── */
   favicon?: string | null;

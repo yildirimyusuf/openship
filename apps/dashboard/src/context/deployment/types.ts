@@ -1,7 +1,11 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FrameworkId, EnvironmentVariable } from "@/components/import-project/types";
-import type { ProjectType, BuildStrategy, DeployTarget, RuntimeMode } from "@repo/core";
+import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
+
+const GENERIC_MULTI_BUILD_IMAGE = "ubuntu:22.04";
+const NON_APP_SINGLE_FLOW_STACKS = new Set<FrameworkId>(["docker", "docker-compose", "unknown"]);
+const NODE_BUILD_PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
 
 // ─── Screenshots ─────────────────────────────────────────────────────────────
 
@@ -41,6 +45,15 @@ export interface ComposeServiceInfo {
   domain?: string;
   customDomain?: string;
   domainType?: "free" | "custom";
+}
+
+export interface PublicEndpoint {
+  id: string;
+  port: string;
+  targetPath: string;
+  domain: string;
+  customDomain: string;
+  domainType: "free" | "custom";
 }
 
 // ─── Per-service deployment status (live from SSE or loaded from DB) ─────────
@@ -83,15 +96,22 @@ export interface DeploymentConfig {
   detectedFramework: FrameworkId | null;
   packageManager: string;
   buildImage: string;
-  domain: string;
-  customDomain: string;
-  domainType: "free" | "custom";
+  publicEndpoints: PublicEndpoint[];
   envVars: EnvironmentVariable[];
   /** Root .env values detected during prepare; user must import before they apply. */
   rootEnvVars: EnvironmentVariable[];
   branch: string;
   branches: string[];
   services: ComposeServiceInfo[];
+  /**
+   * Compose/import projects can either deploy each parsed service, or ignore the
+   * service fan-out for this deployment and use the normal single-app pipeline.
+   */
+  serviceDeploymentMode: "services" | "single";
+  /** Local-only flag so env imports don't overwrite a user-edited runtime port. */
+  productionPortTouched: boolean;
+  /** Last runtime port auto-applied from env detection in this deploy flow. */
+  lastAutoDetectedEnvPort: string | null;
   options: {
     buildCommand: string;
     outputDirectory: string;
@@ -119,12 +139,13 @@ export const DEFAULT_CONFIG: DeploymentConfig = {
   detectedFramework: null,
   packageManager: "npm",
   buildImage: "node:22",
-  domain: "",
-  customDomain: "",
-  domainType: "free",
+  publicEndpoints: [],
   branch: "main",
   branches: [],
   services: [],
+  serviceDeploymentMode: "single",
+  productionPortTouched: false,
+  lastAutoDetectedEnvPort: null,
   options: {
     buildCommand: "",
     outputDirectory: "",
@@ -140,6 +161,68 @@ export const DEFAULT_CONFIG: DeploymentConfig = {
   rootEnvVars: [],
 };
 
+function isSingleFlowAppStack(framework: string | undefined): framework is StackId {
+  return Boolean(
+    framework &&
+    framework in STACKS &&
+    !NON_APP_SINGLE_FLOW_STACKS.has(framework as FrameworkId),
+  );
+}
+
+export function getRecommendedSingleAppBuildImage(
+  config: Pick<DeploymentConfig, "framework" | "packageManager" | "buildImage">,
+): string {
+  if (isSingleFlowAppStack(config.framework)) {
+    return getBuildImage(config.framework, config.packageManager);
+  }
+
+  if (config.packageManager === "bun") {
+    return "oven/bun:latest";
+  }
+
+  if (NODE_BUILD_PACKAGE_MANAGERS.has(config.packageManager)) {
+    return "node:22";
+  }
+
+  if (config.buildImage && config.buildImage !== GENERIC_MULTI_BUILD_IMAGE) {
+    return config.buildImage;
+  }
+
+  return "node:22";
+}
+
+export function resolveBuildImageForDeploymentMode(
+  config: Pick<DeploymentConfig, "projectType" | "serviceDeploymentMode" | "framework" | "packageManager" | "buildImage">,
+  nextMode: DeploymentConfig["serviceDeploymentMode"] = config.serviceDeploymentMode,
+): string {
+  if (config.projectType !== "services") {
+    return config.buildImage || getRecommendedSingleAppBuildImage(config);
+  }
+
+  const serviceStackImage = isSingleFlowAppStack(config.framework)
+    ? getBuildImage(config.framework, config.packageManager)
+    : GENERIC_MULTI_BUILD_IMAGE;
+  const singleAppImage = getRecommendedSingleAppBuildImage(config);
+
+  if (nextMode === "services") {
+    if (!config.buildImage || config.buildImage === singleAppImage) {
+      return serviceStackImage;
+    }
+
+    return config.buildImage;
+  }
+
+  if (
+    !config.buildImage ||
+    config.buildImage === GENERIC_MULTI_BUILD_IMAGE ||
+    config.buildImage === serviceStackImage
+  ) {
+    return singleAppImage;
+  }
+
+  return config.buildImage;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -150,6 +233,135 @@ export const DEFAULT_CONFIG: DeploymentConfig = {
 export function servicesNeedCloud(services?: ComposeServiceInfo[]): boolean {
   if (!services?.length) return false;
   return services.some((s) => s.exposed && s.domainType !== "custom");
+}
+
+export function publicEndpointsNeedCloud(endpoints?: PublicEndpoint[]): boolean {
+  if (!endpoints?.length) return false;
+  return endpoints.some((endpoint) => endpoint.domainType !== "custom");
+}
+
+export function createPublicEndpoint(
+  overrides: Partial<PublicEndpoint> = {},
+): PublicEndpoint {
+  return {
+    id: overrides.id ?? crypto.randomUUID(),
+    port: overrides.port ?? "",
+    targetPath: overrides.targetPath ?? "",
+    domain: overrides.domain ?? "",
+    customDomain: overrides.customDomain ?? "",
+    domainType: overrides.domainType ?? "free",
+  };
+}
+
+export function ensurePublicEndpoints(
+  endpoints: PublicEndpoint[] | undefined,
+  fallback?: {
+    port?: string;
+    targetPath?: string;
+    domain?: string;
+    customDomain?: string;
+    domainType?: "free" | "custom";
+  },
+): PublicEndpoint[] {
+  if (endpoints && endpoints.length > 0) {
+    return endpoints;
+  }
+
+  return [
+    createPublicEndpoint({
+      port: fallback?.port ?? "",
+      targetPath: fallback?.targetPath ?? "",
+      domain: fallback?.domain ?? "",
+      customDomain: fallback?.customDomain ?? "",
+      domainType: fallback?.domainType ?? "free",
+    }),
+  ];
+}
+
+function normalizePublicEndpointForMode(
+  endpoint: PublicEndpoint,
+  opts: { hasServer: boolean; runtimePort: string; isPrimary: boolean },
+): PublicEndpoint {
+  if (opts.hasServer) {
+    return createPublicEndpoint({
+      ...endpoint,
+      port: opts.isPrimary
+        ? (opts.runtimePort || endpoint.port || "")
+        : (endpoint.port || opts.runtimePort || ""),
+      targetPath: "",
+    });
+  }
+
+  return createPublicEndpoint({
+    ...endpoint,
+    port: "",
+    targetPath: endpoint.targetPath || "/",
+  });
+}
+
+export function syncPublicEndpointState(
+  config: DeploymentConfig,
+): DeploymentConfig {
+  const linkedRuntimePort = config.options.hasServer
+    ? (
+        config.options.productionPort ||
+        config.publicEndpoints[0]?.port ||
+        ""
+      )
+    : config.options.productionPort;
+  const endpoints = ensurePublicEndpoints(
+    config.publicEndpoints,
+    config.options.hasServer
+      ? {
+          port: linkedRuntimePort,
+        }
+      : {
+          targetPath: "/",
+        },
+  ).map((endpoint, index) => normalizePublicEndpointForMode(endpoint, {
+    hasServer: config.options.hasServer,
+    runtimePort: linkedRuntimePort,
+    isPrimary: index === 0,
+  }));
+  const primary = endpoints[0];
+
+  return {
+    ...config,
+    publicEndpoints: endpoints,
+    options: {
+      ...config.options,
+      productionPort: config.options.hasServer
+        ? (linkedRuntimePort || primary?.port || "")
+        : config.options.productionPort,
+    },
+  };
+}
+
+export function usesServiceDeployment(
+  config: Pick<DeploymentConfig, "projectType" | "serviceDeploymentMode">,
+): boolean {
+  return config.projectType === "services" && config.serviceDeploymentMode === "services";
+}
+
+export function getPublicEndpointHosts(
+  endpoints: PublicEndpoint[] | undefined,
+  baseDomain: string,
+  fallbackDomain: string,
+): string[] {
+  return ensurePublicEndpoints(endpoints, {
+    domain: fallbackDomain,
+    domainType: "free",
+  })
+    .map((endpoint) => (
+      endpoint.domainType === "custom"
+        ? endpoint.customDomain
+        : endpoint.domain
+          ? `${endpoint.domain}.${baseDomain}`
+          : fallbackDomain
+            ? `${fallbackDomain}.${baseDomain}`
+            : ""
+    ))
+    .filter((hostname, index, hostnames) => Boolean(hostname) && hostnames.indexOf(hostname) === index);
 }
 
 
@@ -176,6 +388,8 @@ export interface DeploymentState {
   buildDurationMs: number | null;
   /** ISO timestamp when the build started (for elapsed timer). */
   buildStartedAt: string | null;
+  /** Accumulated elapsed ms carried from previous failed/cancelled retries. */
+  buildRetryCarryMs: number;
   /** Active pipeline prompt waiting for user response. */
   pendingPrompt: {
     promptId: string;
@@ -206,9 +420,30 @@ export const INITIAL_STATE: DeploymentState = {
   projectId: null,
   buildDurationMs: null,
   buildStartedAt: null,
+  buildRetryCarryMs: 0,
   pendingPrompt: null,
   serviceStatuses: [],
 };
+
+export function resolveBuildElapsedMs(
+  state: Pick<DeploymentState, "buildDurationMs" | "buildStartedAt" | "buildRetryCarryMs">,
+  now = Date.now(),
+): number {
+  const carry = state.buildRetryCarryMs || 0;
+
+  if (typeof state.buildDurationMs === "number") {
+    return Math.max(0, carry + state.buildDurationMs);
+  }
+
+  if (state.buildStartedAt) {
+    const startedAtMs = new Date(state.buildStartedAt).getTime();
+    if (Number.isFinite(startedAtMs)) {
+      return Math.max(0, carry + (now - startedAtMs));
+    }
+  }
+
+  return Math.max(0, carry);
+}
 
 // ─── Status ──────────────────────────────────────────────────────────────────
 

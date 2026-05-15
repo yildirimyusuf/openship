@@ -99,6 +99,14 @@ export interface BuildConfig {
   gitToken?: string;
 }
 
+export interface DeployPublicEndpoint {
+  port?: number;
+  targetPath?: string;
+  domain?: string;
+  customDomain?: string;
+  domainType?: "free" | "custom";
+}
+
 export interface DeployConfig {
   /** Unique deployment id */
   deploymentId: string;
@@ -122,10 +130,10 @@ export interface DeployConfig {
   resources: ResourceConfig;
   /** Container restart policy */
   restartPolicy?: "always" | "on-failure" | "no";
-  /** URL slug for the deployment (e.g. "my-app" → my-app.opsh.io) */
-  slug?: string;
-  /** Custom domain to bind via DNS (e.g. "app.example.com") — separate from free subdomain */
-  customDomain?: string;
+  /** Runtime-safe identifier used for workload/container/page naming. */
+  runtimeName?: string;
+  /** Authoritative public route mappings for this workload. */
+  publicEndpoints?: DeployPublicEndpoint[];
   /** Files/directories to copy into /app/production/ before starting the workload.
    *  When set, the workload runs from /app/production/ instead of /app/. */
   productionPaths?: string[];

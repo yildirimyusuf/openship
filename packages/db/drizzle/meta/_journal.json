@@ -43,6 +43,34 @@
       "when": 1777075200000,
       "tag": "0005_project_apps",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777161600000,
+      "tag": "0006_project_public_endpoints",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1777248000000,
+      "tag": "0007_domain_route_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1777334400000,
+      "tag": "0008_drop_project_public_endpoints",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1777420800000,
+      "tag": "0009_domain_target_path",
+      "breakpoints": true
     }
   ]
 }

@@ -6,9 +6,7 @@ import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { TerminalLogs } from "./logs/TerminalLogs";
 import { ServerLogs } from "./logs/ServerLogs";
 import { LogsActions } from "./logs/LogsActions";
-import { servicesApi, type Service } from "@/lib/api/services";
 import { endpoints } from "@/lib/api/endpoints";
-import { getProjectType } from "@repo/core";
 
 type LogsTab = "terminal" | "server";
 
@@ -21,31 +19,33 @@ export const LogsSettings = () => {
     serverLogsData,
     clearTerminalLogs,
     clearServerLogs,
+    servicesData,
+    hasMultipleServices,
   } = useProjectSettings();
   const hasProjectId = Boolean(id && id !== "undefined");
-  const isServicesProject = getProjectType(projectData?.framework as any) === "services";
   const hasResolvedServerMode =
-    isServicesProject ||
     typeof projectData?.options?.hasServer === "boolean" ||
     typeof projectData?.hasServer === "boolean" ||
     buildData.isLoading === false;
   const effectiveHasServer =
-    isServicesProject ||
     projectData?.options?.hasServer === true ||
     projectData?.hasServer === true ||
     (buildData.isLoading === false && buildData.hasServer === true);
-  const canShowLogs = effectiveHasServer;
-  const canShowTerminal = canShowLogs;
   const [activeTab, setActiveTab] = useState<LogsTab>("server");
   const hasSelectedTabRef = useRef(false);
   const [copied, setCopied] = useState(false);
   const [currentLogs, setCurrentLogs] = useState<string[]>([]);
-  const [services, setServices] = useState<Service[]>([]);
-  const [servicesLoading, setServicesLoading] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
+  const services = servicesData.services;
+  const servicesLoading = servicesData.isLoading;
+  const servicesLoaded = !servicesData.isLoading;
+  const hasServices = services.length > 0;
+  const canShowLogs = effectiveHasServer || hasServices;
+  const canShowTerminal = canShowLogs;
+  const hasResolvedLogTargets = hasResolvedServerMode && (effectiveHasServer || servicesLoaded);
 
   useEffect(() => {
-    if (!hasResolvedServerMode) return;
+    if (!hasResolvedLogTargets) return;
     if (!canShowLogs) {
       setCurrentLogs([]);
       return;
@@ -54,7 +54,7 @@ export const LogsSettings = () => {
     if (!hasSelectedTabRef.current) {
       setActiveTab("terminal");
     }
-  }, [hasResolvedServerMode, canShowLogs]);
+  }, [hasResolvedLogTargets, canShowLogs]);
 
   const switchTab = useCallback(
     (tab: LogsTab) => {
@@ -67,57 +67,40 @@ export const LogsSettings = () => {
   );
 
   useEffect(() => {
-    if (!isServicesProject || !hasProjectId) {
-      setServices([]);
-      setSelectedServiceId(null);
-      return;
-    }
+    if (!hasProjectId || servicesLoading) return;
 
-    let cancelled = false;
-
-    const loadServices = async () => {
-      try {
-        setServicesLoading(true);
-        const response = await servicesApi.list(id);
-        if (cancelled || !response.success) return;
-
-        const nextServices = response.services ?? [];
-        setServices(nextServices);
-        setSelectedServiceId((current) => {
-          if (current && nextServices.some((service) => service.id === current)) {
-            return current;
-          }
-          return nextServices[0]?.id ?? null;
-        });
-      } finally {
-        if (!cancelled) {
-          setServicesLoading(false);
-        }
+    setSelectedServiceId((current) => {
+      if (hasMultipleServices && current && services.some((service) => service.id === current)) {
+        return current;
       }
-    };
 
-    void loadServices();
+      if (hasMultipleServices) {
+        return effectiveHasServer ? null : (services[0]?.id ?? null);
+      }
 
-    return () => {
-      cancelled = true;
-    };
-  }, [hasProjectId, isServicesProject, id]);
+      return !effectiveHasServer && services.length === 1 ? services[0].id : null;
+    });
+  }, [effectiveHasServer, hasMultipleServices, hasProjectId, services, servicesLoading]);
 
   const selectedService = services.find((service) => service.id === selectedServiceId) ?? null;
+  const implicitSingleService =
+    !hasMultipleServices && !effectiveHasServer ? (services[0] ?? null) : null;
+  const terminalService = hasMultipleServices ? selectedService : implicitSingleService;
+  const isServiceLogTarget = Boolean(terminalService);
   const terminalStreamTarget = !hasProjectId
     ? ""
-    : isServicesProject
-    ? selectedServiceId
-      ? endpoints.services.logsStream(id, selectedServiceId)
-      : ""
-    : endpoints.projects.logsStream(id);
+    : isServiceLogTarget
+      ? terminalService
+        ? endpoints.services.logsStream(id, terminalService.id)
+        : ""
+      : endpoints.projects.logsStream(id);
   const terminalHistoryTarget = !hasProjectId
     ? ""
-    : isServicesProject
-    ? selectedServiceId
-      ? endpoints.services.logs(id, selectedServiceId)
-      : ""
-    : endpoints.projects.logs(id);
+    : isServiceLogTarget
+      ? terminalService
+        ? endpoints.services.logs(id, terminalService.id)
+        : ""
+      : endpoints.projects.logs(id);
 
   const handleLogsChange = useCallback((logs: string[]) => {
     setCurrentLogs(logs);
@@ -172,7 +155,7 @@ export const LogsSettings = () => {
     }
   }, [currentLogs, activeTab, clearTerminalLogs, clearServerLogs]);
 
-  if (!hasResolvedServerMode) {
+  if (!hasResolvedLogTargets) {
     return (
       <div className="rounded-2xl border border-border/50 bg-card p-8">
         <div className="space-y-3">
@@ -183,7 +166,7 @@ export const LogsSettings = () => {
     );
   }
 
-  if (hasResolvedServerMode && !canShowLogs) {
+  if (hasResolvedLogTargets && !canShowLogs) {
     return (
       <div className="rounded-2xl border border-border/50 bg-card p-8 text-center">
         <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -191,7 +174,8 @@ export const LogsSettings = () => {
         </div>
         <h3 className="text-sm font-semibold text-foreground">No runtime logs</h3>
         <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-          This project is deployed as a static app, so there is no running server process to stream logs from.
+          This project is deployed as a static app, so there is no running server process to stream
+          logs from.
         </p>
       </div>
     );
@@ -247,23 +231,23 @@ export const LogsSettings = () => {
       <div className="flex-1 min-h-[460px]">
         {activeTab === "terminal" && canShowTerminal && (
           <div className="space-y-4">
-            {isServicesProject && (
+            {hasMultipleServices && (
               <div className="rounded-2xl border border-border/60 bg-card/70 p-4">
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <p className="text-sm font-medium text-foreground">Service Runtime Logs</p>
+                    <p className="text-sm font-medium text-foreground">Runtime log target</p>
                     <p className="text-sm text-muted-foreground">
-                      Use the normal Logs tab and switch between compose services here.
+                      Switch between the project runtime and service runtimes.
                     </p>
                   </div>
                   <div className="min-w-[220px]">
                     <select
                       value={selectedServiceId ?? ""}
                       onChange={(event) => setSelectedServiceId(event.target.value || null)}
-                      disabled={servicesLoading || services.length === 0}
+                      disabled={servicesLoading}
                       className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground outline-none"
                     >
-                      {services.length === 0 && <option value="">No services found</option>}
+                      {effectiveHasServer && <option value="">Project runtime</option>}
                       {services.map((service) => (
                         <option key={service.id} value={service.id}>
                           {service.name}
@@ -275,14 +259,14 @@ export const LogsSettings = () => {
               </div>
             )}
 
-            {isServicesProject && !selectedService ? (
+            {hasMultipleServices && !effectiveHasServer && !selectedService ? (
               <div className="flex min-h-[420px] items-center justify-center rounded-3xl border border-border/50 bg-card text-sm text-muted-foreground">
                 Select a service to view its runtime logs.
               </div>
             ) : (
               <TerminalLogs
                 projectId={id}
-                projectName={selectedService?.name || projectData?.name || "Project"}
+                projectName={terminalService?.name || projectData?.name || "Project"}
                 streamTarget={terminalStreamTarget}
                 historyTarget={terminalHistoryTarget}
                 onLogsChange={handleLogsChange}

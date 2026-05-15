@@ -8,7 +8,11 @@ import { encrypt, decrypt } from "../../lib/encryption";
 import { assertProjectAccess, platform } from "../../lib/controller-helpers";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { buildServiceRouteDomain, getRoutingBaseDomain } from "../../lib/routing-domains";
-import type { TUpdateServiceBody, TSetServiceEnvVarsBody } from "./service.schema";
+import type {
+  TCreateServiceBody,
+  TUpdateServiceBody,
+  TSetServiceEnvVarsBody,
+} from "./service.schema";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -21,6 +25,11 @@ async function assertServiceAccess(projectId: string, serviceId: string, userId:
   }
   return { project, svc };
 }
+
+const trimOrNull = (value?: string | null) => {
+  const trimmed = value?.trim();
+  return trimmed || null;
+};
 
 function normalizeRoutingPatch(input: {
   exposed?: boolean | null;
@@ -35,11 +44,6 @@ function normalizeRoutingPatch(input: {
   customDomain: string | null;
   domainType: "free" | "custom";
 } {
-  const trimOrNull = (value?: string | null) => {
-    const trimmed = value?.trim();
-    return trimmed || null;
-  };
-
   const exposed = input.exposed ?? false;
   if (!exposed) {
     return {
@@ -74,7 +78,47 @@ export async function getService(projectId: string, serviceId: string, userId: s
   return svc;
 }
 
-// ─── Update ──────────────────────────────────────────────────────────────────
+// ─── Create / Update ─────────────────────────────────────────────────────────
+
+export async function createService(projectId: string, userId: string, data: TCreateServiceBody) {
+  await assertProjectAccess(projectId, userId);
+
+  const name = data.name.trim();
+  if (!name) {
+    throw new Error("service-name-required");
+  }
+
+  const existing = await repos.service.findByName(projectId, name);
+  if (existing) {
+    throw new Error("service-name-already-exists");
+  }
+
+  const services = await repos.service.listByProject(projectId);
+  const routing = normalizeRoutingPatch({
+    exposed: data.exposed ?? false,
+    exposedPort: data.exposedPort,
+    domain: data.domain,
+    customDomain: data.customDomain,
+    domainType: data.domainType,
+  });
+
+  return repos.service.create({
+    projectId,
+    name,
+    image: trimOrNull(data.image),
+    build: trimOrNull(data.build),
+    dockerfile: trimOrNull(data.dockerfile),
+    ports: data.ports ?? [],
+    dependsOn: data.dependsOn ?? [],
+    environment: data.environment ?? {},
+    volumes: data.volumes ?? [],
+    command: trimOrNull(data.command),
+    restart: data.restart ?? "unless-stopped",
+    ...routing,
+    enabled: data.enabled ?? true,
+    sortOrder: data.sortOrder ?? services.length,
+  });
+}
 
 export async function updateService(
   projectId: string,
@@ -86,11 +130,34 @@ export async function updateService(
 
   // Normalize routing: when exposed is turned off, clear routing fields.
   // When domainType changes, clear the irrelevant domain field.
-  const patch = { ...data };
+  const patch: Record<string, any> = { ...data };
+
+  if ("name" in patch && typeof patch.name === "string") {
+    const name = patch.name.trim();
+    if (!name) {
+      throw new Error("service-name-required");
+    }
+
+    if (name !== svc.name) {
+      const existing = await repos.service.findByName(projectId, name);
+      if (existing && existing.id !== serviceId) {
+        throw new Error("service-name-already-exists");
+      }
+    }
+
+    patch.name = name;
+  }
+
+  for (const key of ["image", "build", "dockerfile", "command"] as const) {
+    if (key in patch) {
+      patch[key] = trimOrNull(patch[key]);
+    }
+  }
 
   const touchesRouting = ["exposed", "exposedPort", "domain", "customDomain", "domainType"].some(
     (key) => key in patch,
   );
+  const nameChanged = typeof patch.name === "string" && patch.name !== svc.name;
 
   if (touchesRouting) {
     const normalized = normalizeRoutingPatch({
@@ -111,49 +178,48 @@ export async function updateService(
   await repos.service.update(serviceId, patch);
   const updated = await repos.service.findById(serviceId);
 
-  // ── Route management on enable/disable ───────────────────────
-  // When disabling a service that is publicly exposed, remove the route.
-  // When re-enabling a service that is publicly exposed, re-register the route.
+  // ── Route management ─────────────────────────────────────────
+  // Keep live routes aligned when enable/expose/domain/port/name changes.
   const enabledChanged = typeof data.enabled === "boolean" && data.enabled !== svc.enabled;
-  const exposedChanged = touchesRouting && (patch.exposed !== svc.exposed);
+  const exposedChanged = touchesRouting && patch.exposed !== svc.exposed;
 
-  if (updated && (enabledChanged || exposedChanged)) {
+  if (updated && (enabledChanged || exposedChanged || touchesRouting || nameChanged)) {
     try {
       const { routing, runtime } = platform();
       const runtimeName = runtime.name;
       const wasRoutable = svc.enabled && svc.exposed;
       const isRoutable = (updated.enabled ?? svc.enabled) && (updated.exposed ?? svc.exposed);
+      const oldRoute = buildServiceRouteDomain({
+        project,
+        service: svc,
+        runtimeName,
+        usesManagedRouting: true,
+      });
+      const nextRoute = buildServiceRouteDomain({
+        project,
+        service: updated,
+        runtimeName,
+        usesManagedRouting: true,
+      });
+      const oldHostname = oldRoute?.hostname.toLowerCase();
+      const nextHostname = nextRoute?.hostname.toLowerCase();
 
-      if (wasRoutable && !isRoutable) {
-        // Remove route for old hostname
-        const oldRoute = buildServiceRouteDomain({
-          project,
-          service: svc,
-          runtimeName,
-          usesManagedRouting: true,
-        });
+      if (wasRoutable && (!isRoutable || oldHostname !== nextHostname)) {
         if (oldRoute) {
           await routing.removeRoute(oldRoute.hostname);
         }
-      } else if (!wasRoutable && isRoutable) {
-        // Re-register route — need the container IP for the target URL
-        const routeDomain = buildServiceRouteDomain({
-          project,
-          service: updated,
-          runtimeName,
-          usesManagedRouting: true,
-        });
-        if (routeDomain && project.activeDeploymentId) {
-          const rows = await repos.service.listByDeployment(project.activeDeploymentId);
-          const row = rows.find((r) => r.serviceId === serviceId);
-          if (row?.ip) {
-            const port = updated.exposedPort || row.hostPort?.toString() || "80";
-            await routing.registerRoute({
-              domain: routeDomain.hostname,
-              tls: true,
-              targetUrl: `http://${row.ip}:${port}`,
-            });
-          }
+      }
+
+      if (isRoutable && nextRoute && project.activeDeploymentId) {
+        const rows = await repos.service.listByDeployment(project.activeDeploymentId);
+        const row = rows.find((r) => r.serviceId === serviceId);
+        if (row?.ip) {
+          const port = updated.exposedPort || row.hostPort?.toString() || "80";
+          await routing.registerRoute({
+            domain: nextRoute.hostname,
+            tls: true,
+            targetUrl: `http://${row.ip}:${port}`,
+          });
         }
       }
     } catch (err) {
@@ -162,6 +228,45 @@ export async function updateService(
   }
 
   return updated;
+}
+
+export async function deleteService(projectId: string, serviceId: string, userId: string) {
+  const { project, svc } = await assertServiceAccess(projectId, serviceId, userId);
+
+  if (project.activeDeploymentId) {
+    const dep = await repos.deployment.findById(project.activeDeploymentId);
+    const serviceDeployments = await repos.service.listByDeployment(project.activeDeploymentId);
+    const serviceDeployment = serviceDeployments.find((row) => row.serviceId === serviceId);
+
+    if (dep && serviceDeployment?.containerId) {
+      const { runtime } = await resolveDeploymentRuntime(dep);
+      await runtime.destroy(serviceDeployment.containerId).catch((err) => {
+        console.error(
+          `[SERVICE] Failed to destroy service container ${serviceDeployment.containerId}:`,
+          err,
+        );
+      });
+    }
+  }
+
+  if (svc.exposed) {
+    try {
+      const { routing, runtime } = platform();
+      const route = buildServiceRouteDomain({
+        project,
+        service: svc,
+        runtimeName: runtime.name,
+        usesManagedRouting: true,
+      });
+      if (route) {
+        await routing.removeRoute(route.hostname);
+      }
+    } catch (err) {
+      console.error(`[SERVICE] Failed to remove route for ${svc.name}:`, err);
+    }
+  }
+
+  await repos.service.remove(serviceId);
 }
 
 // ─── Service Environment Variables ───────────────────────────────────────────
@@ -269,7 +374,11 @@ export async function stopServiceContainer(projectId: string, serviceId: string,
   return { containerId };
 }
 
-export async function restartServiceContainer(projectId: string, serviceId: string, userId: string) {
+export async function restartServiceContainer(
+  projectId: string,
+  serviceId: string,
+  userId: string,
+) {
   const { runtime, containerId } = await resolveServiceContainer(projectId, serviceId, userId);
   await runtime.restart(containerId);
   return { containerId };
@@ -292,7 +401,11 @@ export async function streamServiceRuntimeLogs(
   onLog: (entry: LogEntry) => void,
   opts?: { tail?: number },
 ) {
-  const { runtime, containerId, serverId } = await resolveServiceContainer(projectId, serviceId, userId);
+  const { runtime, containerId, serverId } = await resolveServiceContainer(
+    projectId,
+    serviceId,
+    userId,
+  );
   const cleanup = await runtime.streamRuntimeLogs(containerId, onLog, opts);
   return { cleanup, serverId };
 }
