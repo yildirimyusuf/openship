@@ -19,7 +19,7 @@
  *   Generic: Node.js, static, Docker
  */
 
-import { STACKS, OUTPUT_DIRECTORIES, getProjectType, getBuildImage, type StackId, type ProjectType, type StackDefinition } from "@repo/core";
+import { STACKS, OUTPUT_DIRECTORIES, getProjectType, getBuildImage, type StackId, type ProjectType, type StackDefinition, type StackDetection } from "@repo/core";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -131,281 +131,186 @@ export function detectPackageManager(
 
 interface FrameworkRule {
   stack: StackId;
-  fileMatch: (fs: Set<string>) => boolean;
+  /** Override for stacks where a marker file alone is not enough (e.g. Rails needs Gemfile AND bin/rails). */
+  fileMatch?: (fs: Set<string>) => boolean;
+  /** Override the dep gate (e.g. Vue needs `vue` AND `!nuxt`). */
   depMatch?: (deps: Record<string, string>) => boolean;
-  /** Match against file contents map (lowercase filename → content) */
+  /** Override the content gate. By default content patterns from STACKS.detection.contentPatterns are used. */
   contentMatch?: (fileContents: Record<string, string>) => boolean;
 }
 
+/** True if any of the stack's rootMarkers exist in the file set (lowercased). */
+function hasAnyRootMarker(detection: StackDetection | undefined, fileSet: Set<string>): boolean {
+  const markers = detection?.rootMarkers;
+  if (!markers || markers.length === 0) return false;
+  for (const marker of markers) {
+    if (fileSet.has(marker.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** True if any of the stack's deps appears in the dep map. */
+function hasAnyDep(detection: StackDetection | undefined, deps: Record<string, string>): boolean {
+  const list = detection?.deps;
+  if (!list || list.length === 0) return false;
+  for (const name of list) {
+    if (deps[name]) return true;
+  }
+  return false;
+}
+
+/** True if any of the stack's contentPatterns matches the relevant file content. */
+function hasAnyContentMatch(detection: StackDetection | undefined, fileContents: Record<string, string>): boolean {
+  const patterns = detection?.contentPatterns;
+  if (!patterns) return false;
+  for (const [name, source] of Object.entries(patterns)) {
+    const content = fileContents[name.toLowerCase()];
+    if (!content) continue;
+    if (new RegExp(source, "i").test(content)) return true;
+  }
+  return false;
+}
+
 /**
- * Rules are ordered by specificity — most specific first.
- * Frontend/fullstack frameworks are checked before generic backend ones
- * because a Next.js project also has express as a transitive dep.
+ * Priority-ordered detection rules. Each entry resolves to:
+ *   fileMatch = explicit override OR `hasAnyRootMarker(stack.detection)`
+ *   depMatch  = explicit override OR `hasAnyDep(stack.detection)`
+ *   contentMatch = explicit override OR `hasAnyContentMatch(stack.detection)`
+ *
+ * Ordering matters: frontend/fullstack frameworks come before generic backend
+ * ones because (for instance) a Next.js project also has Express in transitive
+ * deps. When a stack only needs default matchers, list just `{ stack: "..." }`.
  */
 const FRAMEWORK_RULES: FrameworkRule[] = [
   // ── Frontend / Fullstack JS (check first — they may also have backend deps) ──
-
-  {
-    stack: "nextjs",
-    fileMatch: (fs) =>
-      fs.has("next.config.js") || fs.has("next.config.mjs") || fs.has("next.config.ts"),
-    depMatch: (d) => !!d.next,
-  },
-  {
-    stack: "nuxt",
-    fileMatch: (fs) =>
-      fs.has("nuxt.config.js") || fs.has("nuxt.config.ts") || fs.has("nuxt.config.mjs"),
-    depMatch: (d) => !!d.nuxt || !!d["@nuxt/core"],
-  },
-  {
-    stack: "sveltekit",
-    fileMatch: (fs) => fs.has("svelte.config.js") || fs.has("svelte.config.mjs"),
-    depMatch: (d) => !!d.svelte || !!d["@sveltejs/kit"],
-  },
-  {
-    stack: "astro",
-    fileMatch: (fs) =>
-      fs.has("astro.config.mjs") || fs.has("astro.config.js") || fs.has("astro.config.ts"),
-    depMatch: (d) => !!d.astro,
-  },
-  {
-    stack: "remix",
-    fileMatch: (fs) =>
-      fs.has("remix.config.js") || fs.has("remix.config.ts") || fs.has("app/root.tsx"),
-    depMatch: (d) => !!d["@remix-run/react"] || !!d["@remix-run/node"] || !!d.remix,
-  },
-  {
-    stack: "angular",
-    fileMatch: (fs) => fs.has("angular.json"),
-    depMatch: (d) => !!d["@angular/core"],
-  },
-  {
-    stack: "gatsby",
-    fileMatch: (fs) => fs.has("gatsby-config.js") || fs.has("gatsby-config.ts"),
-    depMatch: (d) => !!d.gatsby,
-  },
-  {
-    stack: "vite",
-    fileMatch: (fs) =>
-      fs.has("vite.config.js") || fs.has("vite.config.ts") || fs.has("vite.config.mjs"),
-    depMatch: (d) => !!d.vite,
-  },
+  { stack: "nextjs" },
+  { stack: "nuxt" },
+  { stack: "sveltekit" },
+  { stack: "astro" },
+  { stack: "remix" },
+  { stack: "angular" },
+  { stack: "gatsby" },
+  { stack: "vite" },
+  // CRA has no durable file marker — depMatch alone is authoritative.
   {
     stack: "cra",
-    fileMatch: (fs) => fs.has("public") && fs.has("src") && fs.has("package.json"),
-    depMatch: (d) => !!d["react-scripts"],
+    fileMatch: (fs) => fs.has("package.json"),
   },
+  // Vue CLI: deps gate excludes Nuxt (which also depends on vue).
   {
     stack: "vue",
-    fileMatch: (fs) => fs.has("vue.config.js") || fs.has("vue.config.ts"),
     depMatch: (d) => !!d.vue && !d.nuxt,
   },
 
   // ── Backend JS/TS (check before generic "node") ──
-
-  {
-    stack: "nestjs",
-    fileMatch: (fs) => fs.has("nest-cli.json") || fs.has("tsconfig.build.json"),
-    depMatch: (d) => !!d["@nestjs/core"],
-  },
-  {
-    stack: "adonis",
-    fileMatch: (fs) => fs.has("ace.js") || fs.has(".adonisrc.json") || fs.has("adonisrc.ts"),
-    depMatch: (d) => !!d["@adonisjs/core"],
-  },
+  { stack: "nestjs" },
+  { stack: "adonis" },
   {
     stack: "elysia",
     fileMatch: (fs) => fs.has("package.json"),
-    depMatch: (d) => !!d.elysia,
   },
   {
     stack: "hono",
     fileMatch: (fs) => fs.has("package.json"),
-    depMatch: (d) => !!d.hono,
   },
   {
     stack: "fastify",
     fileMatch: (fs) => fs.has("package.json"),
-    depMatch: (d) => !!d.fastify,
   },
   {
     stack: "koa",
     fileMatch: (fs) => fs.has("package.json"),
-    depMatch: (d) => !!d.koa,
   },
   {
     stack: "express",
     fileMatch: (fs) => fs.has("package.json"),
-    depMatch: (d) => !!d.express,
   },
 
-  // ── Python ────────────────────────────────────────────────────────────────
+  // ── Python frameworks ────────────────────────────────────────────────────
+  { stack: "django" },
+  { stack: "flask" },
+  { stack: "fastapi" },
 
-  {
-    stack: "django",
-    fileMatch: (fs) => fs.has("manage.py") || fs.has("django") || fs.has("settings.py"),
-  },
-  {
-    stack: "flask",
-    fileMatch: (fs) => fs.has("requirements.txt") || fs.has("pyproject.toml") || fs.has("pipfile"),
-    depMatch: (d) => !!d.flask || !!d.Flask,
-  },
-  {
-    stack: "fastapi",
-    fileMatch: (fs) => fs.has("requirements.txt") || fs.has("pyproject.toml") || fs.has("pipfile"),
-    depMatch: (d) => !!d.fastapi || !!d.FastAPI,
-  },
-
-  // ── Go ────────────────────────────────────────────────────────────────────
-
-  {
-    stack: "gin",
-    fileMatch: (fs) => fs.has("go.mod"),
-    // contentMatch can be used later when we parse go.mod
-    depMatch: (d) => !!d["github.com/gin-gonic/gin"],
-  },
-  {
-    stack: "fiber",
-    fileMatch: (fs) => fs.has("go.mod"),
-    depMatch: (d) => !!d["github.com/gofiber/fiber"],
-  },
-  {
-    stack: "echo",
-    fileMatch: (fs) => fs.has("go.mod"),
-    depMatch: (d) => !!d["github.com/labstack/echo"],
-  },
+  // ── Go ───────────────────────────────────────────────────────────────────
+  { stack: "gin" },
+  { stack: "fiber" },
+  { stack: "echo" },
   {
     stack: "go",
     fileMatch: (fs) => fs.has("go.mod") || fs.has("main.go"),
   },
 
-  // ── Rust ──────────────────────────────────────────────────────────────────
+  // ── Rust ─────────────────────────────────────────────────────────────────
+  { stack: "actix" },
+  { stack: "axum" },
+  { stack: "rocket" },
+  { stack: "rust" },
 
-  {
-    stack: "actix",
-    fileMatch: (fs) => fs.has("cargo.toml"),
-    depMatch: (d) => !!d["actix-web"],
-  },
-  {
-    stack: "axum",
-    fileMatch: (fs) => fs.has("cargo.toml"),
-    depMatch: (d) => !!d.axum,
-  },
-  {
-    stack: "rocket",
-    fileMatch: (fs) => fs.has("cargo.toml"),
-    depMatch: (d) => !!d.rocket,
-  },
-  {
-    stack: "rust",
-    fileMatch: (fs) => fs.has("cargo.toml"),
-  },
-
-  // ── Ruby ──────────────────────────────────────────────────────────────────
-
+  // ── Ruby ─────────────────────────────────────────────────────────────────
+  // Rails: Gemfile AND (bin/rails OR config/routes.rb). Encoded as a conjunction.
   {
     stack: "rails",
     fileMatch: (fs) => fs.has("gemfile") && (fs.has("config/routes.rb") || fs.has("bin/rails")),
   },
-  {
-    stack: "sinatra",
-    fileMatch: (fs) => fs.has("gemfile"),
-    depMatch: (d) => !!d.sinatra,
-  },
+  { stack: "sinatra" },
 
-  // ── PHP ───────────────────────────────────────────────────────────────────
-
-  {
-    stack: "laravel",
-    fileMatch: (fs) => fs.has("artisan") || fs.has("composer.json"),
-    depMatch: (d) => !!d["laravel/framework"],
-  },
+  // ── PHP ──────────────────────────────────────────────────────────────────
+  { stack: "laravel" },
+  // Symfony needs both composer.json AND symfony.lock — conjunction.
   {
     stack: "symfony",
     fileMatch: (fs) => fs.has("composer.json") && fs.has("symfony.lock"),
-    depMatch: (d) => !!d["symfony/framework-bundle"],
   },
 
-  // ── Java ──────────────────────────────────────────────────────────────────
+  // ── Java ─────────────────────────────────────────────────────────────────
+  { stack: "springboot" },
+  { stack: "quarkus" },
 
-  {
-    stack: "springboot",
-    fileMatch: (fs) =>
-      fs.has("pom.xml") || fs.has("build.gradle") || fs.has("build.gradle.kts"),
-    depMatch: (d) =>
-      !!d["org.springframework.boot:spring-boot-starter-web"] || !!d["spring-boot"],
-    contentMatch: (fc) =>
-      /spring[-.]boot/i.test((fc["pom.xml"] ?? "") + (fc["build.gradle"] ?? "") + (fc["build.gradle.kts"] ?? "")),
-  },
-  {
-    stack: "quarkus",
-    fileMatch: (fs) =>
-      fs.has("pom.xml") || fs.has("build.gradle") || fs.has("build.gradle.kts"),
-    depMatch: (d) => !!d["io.quarkus:quarkus-core"] || !!d.quarkus,
-    contentMatch: (fc) =>
-      /io\.quarkus/i.test((fc["pom.xml"] ?? "") + (fc["build.gradle"] ?? "") + (fc["build.gradle.kts"] ?? "")),
-  },
-
-  // ── C# / .NET ─────────────────────────────────────────────────────────────
-
+  // ── C# / .NET ────────────────────────────────────────────────────────────
+  // Blazor: a .csproj is present + has the WebAssembly dep.
   {
     stack: "blazor",
     fileMatch: (fs) => {
       for (const name of fs) if (name.endsWith(".csproj")) return true;
       return false;
     },
-    depMatch: (d) => !!d["Microsoft.AspNetCore.Components.WebAssembly"],
   },
+  // .NET: any project/solution file suffix.
   {
     stack: "dotnet",
     fileMatch: (fs) => {
       for (const name of fs) {
-        if (name.endsWith(".csproj") || name.endsWith(".fsproj") || name.endsWith(".sln"))
+        if (name.endsWith(".csproj") || name.endsWith(".fsproj") || name.endsWith(".sln")) {
           return true;
+        }
       }
       return false;
     },
   },
 
-  // ── Elixir ────────────────────────────────────────────────────────────────
-
+  // ── Elixir ───────────────────────────────────────────────────────────────
+  // Phoenix needs mix.exs AND (lib OR config/config.exs) — conjunction.
   {
     stack: "phoenix",
     fileMatch: (fs) => fs.has("mix.exs") && (fs.has("lib") || fs.has("config/config.exs")),
-    depMatch: (d) => !!d.phoenix,
   },
 
-  // ── Generic Python (catch-all — after specific Python frameworks) ─────────
+  // ── Generic Python (catch-all — after specific Python frameworks) ────────
+  { stack: "python" },
 
-  {
-    stack: "python",
-    fileMatch: (fs) =>
-      fs.has("requirements.txt") || fs.has("pyproject.toml") || fs.has("pipfile") || fs.has("setup.py"),
-  },
+  // ── Docker Compose (check before single Dockerfile) ──────────────────────
+  { stack: "docker-compose" },
 
-  // ── Docker Compose (check before single Dockerfile) ───────────────────────
+  // ── Dockerfile (single container) ────────────────────────────────────────
+  { stack: "docker" },
 
-  {
-    stack: "docker-compose",
-    fileMatch: (fs) => fs.has("docker-compose.yml") || fs.has("docker-compose.yaml") || fs.has("compose.yml") || fs.has("compose.yaml"),
-  },
-
-  // ── Dockerfile (single container) ─────────────────────────────────
-
-  {
-    stack: "docker",
-    fileMatch: (fs) => fs.has("dockerfile"),
-  },
-
-  // ── Static site (no package.json / manifest at all) ───────────────────────
-
+  // ── Static site (no package.json / manifest at all) ──────────────────────
   {
     stack: "static",
     fileMatch: (fs) => fs.has("index.html") && !fs.has("package.json"),
   },
 
-  // ── Generic Node.js (catch-all for JS) ────────────────────────────────────
-
+  // ── Generic Node.js (catch-all for JS) ───────────────────────────────────
   {
     stack: "node",
     fileMatch: (fs) =>
@@ -467,7 +372,9 @@ function parsePyprojectToml(content: string): Record<string, string> {
   }
 
   // Poetry: [tool.poetry.dependencies]
-  const poetry = content.match(/\[tool\.poetry\.dependencies\]([\s\S]*?)(?=\[|$)/);
+  // Terminate body at `\n[` (next section header). Using bare `\[` would mis-stop
+  // on `[` inside string values like `flask = {extras = ["redis"]}`.
+  const poetry = content.match(/\[tool\.poetry\.dependencies\]([\s\S]*?)(?=\n\[|$)/);
   if (poetry) {
     for (const line of poetry[1].split("\n")) {
       const m = line.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\s*=/);
@@ -475,8 +382,13 @@ function parsePyprojectToml(content: string): Record<string, string> {
     }
   }
 
-  // Optional dependencies groups: [project.optional-dependencies.*]
-  const optGroups = content.matchAll(/\[project\.optional-dependencies\.[^\]]+\]([\s\S]*?)(?=\[|$)/g);
+  // Optional dependencies — matches both PEP 621 standard form
+  //   [project.optional-dependencies]
+  //     api = ["fastapi", "uvicorn[standard]"]
+  // and the per-group sub-table form
+  //   [project.optional-dependencies.api]
+  // The body is scanned for any quoted string that starts with a package name.
+  const optGroups = content.matchAll(/\[project\.optional-dependencies(?:\.[^\]]+)?\]([\s\S]*?)(?=\n\[|$)/g);
   for (const group of optGroups) {
     const items = group[1].matchAll(/["']([^"']+)["']/g);
     for (const item of items) {
@@ -491,7 +403,9 @@ function parsePyprojectToml(content: string): Record<string, string> {
 /** Parse Pipfile [packages] + [dev-packages] sections */
 function parsePipfile(content: string): Record<string, string> {
   const deps: Record<string, string> = {};
-  const sections = content.matchAll(/\[(packages|dev-packages)\]([\s\S]*?)(?=\[|$)/g);
+  // Terminate body at next section header (`\n[`) — guards against `[` inside
+  // inline-table values like `flask = {extras = ["redis"]}`.
+  const sections = content.matchAll(/\[(packages|dev-packages)\]([\s\S]*?)(?=\n\[|$)/g);
   for (const section of sections) {
     for (const line of section[2].split("\n")) {
       const m = line.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\s*=/);
@@ -531,7 +445,9 @@ function parseGoMod(content: string): Record<string, string> {
 /** Parse Cargo.toml [dependencies] / [dev-dependencies] / [build-dependencies] */
 function parseCargoToml(content: string): Record<string, string> {
   const deps: Record<string, string> = {};
-  const sections = content.matchAll(/\[(?:workspace\.)?(?:dev-|build-)?dependencies\]([\s\S]*?)(?=\[|$)/g);
+  // Terminate body at next section header (`\n[`) — guards against `[` inside
+  // inline-table values like `tokio = { features = ["full"] }`.
+  const sections = content.matchAll(/\[(?:workspace\.)?(?:dev-|build-)?dependencies\]([\s\S]*?)(?=\n\[|$)/g);
   for (const section of sections) {
     for (const line of section[1].split("\n")) {
       const trimmed = line.trim();
@@ -614,14 +530,34 @@ export function detectStack(
   let matched: StackId = "unknown";
 
   for (const rule of FRAMEWORK_RULES) {
-    if (!rule.fileMatch(fileSet)) continue;
+    const detection = (STACKS[rule.stack] as StackDefinition).detection;
 
-    const hasGates = !!(rule.depMatch || rule.contentMatch);
-    if (!hasGates) { matched = rule.stack; break; }
+    // File gate: explicit override wins; otherwise any rootMarker in the file set.
+    const fileOk = rule.fileMatch
+      ? rule.fileMatch(fileSet)
+      : hasAnyRootMarker(detection, fileSet);
+    if (!fileOk) continue;
 
-    const depOk = rule.depMatch?.(deps) ?? false;
-    const contentOk = rule.contentMatch?.(fc) ?? false;
-    if (depOk || contentOk) { matched = rule.stack; break; }
+    // Gate sources: a rule has gates if it overrides depMatch/contentMatch OR
+    // the stack registers deps/contentPatterns. A stack with neither passes
+    // straight through on file match alone.
+    const hasDepGate = !!rule.depMatch || (detection?.deps?.length ?? 0) > 0;
+    const hasContentGate = !!rule.contentMatch || !!detection?.contentPatterns;
+    if (!hasDepGate && !hasContentGate) {
+      matched = rule.stack;
+      break;
+    }
+
+    const depOk = rule.depMatch
+      ? rule.depMatch(deps)
+      : hasAnyDep(detection, deps);
+    const contentOk = rule.contentMatch
+      ? rule.contentMatch(fc)
+      : hasAnyContentMatch(detection, fc);
+    if (depOk || contentOk) {
+      matched = rule.stack;
+      break;
+    }
   }
 
   const pm = detectPackageManager(files, packageJson as Record<string, unknown> & {

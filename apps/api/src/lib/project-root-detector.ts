@@ -1,6 +1,5 @@
-import { getBuildImage } from "@repo/core";
+import { STACK_ROOT_MARKERS, getBuildImage } from "@repo/core";
 import {
-  MANIFEST_FILES,
   detectPackageManager,
   detectStack,
   getBuildCommand,
@@ -39,35 +38,19 @@ export interface ProjectRootHint {
 
 const NESTED_APP_CATEGORIES = new Set(["frontend", "fullstack", "static"]);
 
-const DISCOVERED_ROOT_MARKERS = new Set([
-  "package.json",
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  "compose.yml",
-  "compose.yaml",
-  "index.html",
-  "next.config.js",
-  "next.config.mjs",
-  "next.config.ts",
-  "nuxt.config.js",
-  "nuxt.config.ts",
-  "nuxt.config.mjs",
-  "svelte.config.js",
-  "svelte.config.mjs",
-  "astro.config.js",
-  "astro.config.mjs",
-  "astro.config.ts",
-  "vite.config.js",
-  "vite.config.ts",
-  "vite.config.mjs",
-  "angular.json",
-  "gatsby-config.js",
-  "gatsby-config.ts",
-  "vue.config.js",
-  "vue.config.ts",
-  // Nx project marker — each Nx workspace project carries a project.json
+/**
+ * Files that mark a directory as a project root candidate.
+ *
+ * Composed from:
+ *   - {@link STACK_ROOT_MARKERS} — every stack's config files (next.config.*, vite.config.*,
+ *     docker-compose.yml, requirements.txt, go.mod, Cargo.toml, etc.). Adding a stack with
+ *     `detection.rootMarkers` in the core registry automatically flows here.
+ *   - Workspace / monorepo project markers (Nx `project.json`) not tied to a single stack.
+ */
+const DISCOVERED_ROOT_MARKERS = new Set<string>([
+  ...STACK_ROOT_MARKERS,
+  // Nx workspace project marker — every Nx project has its own project.json.
   "project.json",
-  ...MANIFEST_FILES.map((name) => name.toLowerCase()),
 ]);
 
 const IGNORED_REPO_DIRS = new Set([
@@ -76,12 +59,18 @@ const IGNORED_REPO_DIRS = new Set([
   ".next",
   ".nuxt",
   ".output",
+  ".svelte-kit",
+  ".astro",
   ".turbo",
   ".vercel",
   ".venv",
+  ".idea",
+  ".vscode",
+  ".cache",
   "__pycache__",
   "build",
   "dist",
+  "out",
   "coverage",
   "target",
   "vendor",
@@ -331,6 +320,16 @@ function preScoreHint(rootDirectory: string, source: ProjectRootHint["source"]):
   return score;
 }
 
+/**
+ * True if a normalized candidate path escapes the repo (e.g. "..", "../sibling")
+ * or hits an ignored directory. Used to filter junk hints from `vercel.json`
+ * that point outside the deployable tree.
+ */
+function isOutsideRepoCandidate(candidate: string): boolean {
+  if (!candidate) return true;
+  return candidate.split("/").some((segment) => segment === "..");
+}
+
 export function parseVercelRootDirectories(vercelConfig?: string): string[] {
   if (!vercelConfig) {
     return [];
@@ -346,15 +345,22 @@ export function parseVercelRootDirectories(vercelConfig?: string): string[] {
 
     for (const match of buildCommand.matchAll(/(?:^|&&)\s*cd\s+['"]?([^'"&\s]+)['"]?/g)) {
       const candidate = normalizeProjectRootDirectory(match[1]);
-      if (candidate) {
-        directories.add(candidate);
+      if (!candidate || isOutsideRepoCandidate(candidate) || isIgnoredRepoPath(candidate)) {
+        continue;
       }
+      directories.add(candidate);
     }
 
     const outputDirectory = typeof parsed.outputDirectory === "string" ? parsed.outputDirectory : "";
-    const outputRoot = normalizeProjectRootDirectory(pathPosix.dirname(outputDirectory));
-    if (outputRoot) {
-      directories.add(outputRoot);
+    if (outputDirectory) {
+      const outputDir = pathPosix.dirname(outputDirectory);
+      // dirname("dist") === "." — that's the repo root, not a useful hint.
+      if (outputDir && outputDir !== ".") {
+        const outputRoot = normalizeProjectRootDirectory(outputDir);
+        if (outputRoot && !isOutsideRepoCandidate(outputRoot) && !isIgnoredRepoPath(outputRoot)) {
+          directories.add(outputRoot);
+        }
+      }
     }
 
     return [...directories];

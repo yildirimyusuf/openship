@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyWorkspaceContext,
   discoverProjectRootHints,
+  parseVercelRootDirectories,
   selectPreferredProjectRoot,
   selectPreferredSingleAppRoot,
 } from "../../src/lib/project-root-detector";
@@ -355,5 +356,494 @@ describe("selectPreferredProjectRoot", () => {
     ]);
 
     expect(hints).toContainEqual({ rootDirectory: "apps/web", source: "discovered" });
+  });
+});
+
+// ─── Workspace-format coverage ───────────────────────────────────────────────
+
+describe("discoverProjectRootHints — workspace formats", () => {
+  it("npm/yarn workspaces array form (package.json.workspaces=[\"apps/*\"])", () => {
+    const hints = discoverProjectRootHints(
+      [
+        { path: "package.json", type: "file" },
+        { path: "apps/web/package.json", type: "file" },
+        { path: "apps/api/package.json", type: "file" },
+      ],
+      undefined,
+      { workspaces: ["apps/*"] },
+    );
+
+    expect(hints).toContainEqual({ rootDirectory: "apps/web", source: "workspace" });
+    expect(hints).toContainEqual({ rootDirectory: "apps/api", source: "workspace" });
+  });
+
+  it("yarn workspaces object form (package.json.workspaces.packages=[...])", () => {
+    const hints = discoverProjectRootHints(
+      [
+        { path: "package.json", type: "file" },
+        { path: "packages/ui/package.json", type: "file" },
+      ],
+      undefined,
+      { workspaces: { packages: ["packages/*"], nohoist: ["**/react"] } },
+    );
+
+    expect(hints).toContainEqual({ rootDirectory: "packages/ui", source: "workspace" });
+  });
+
+  it("pnpm-workspace.yaml with both apps/* and packages/* patterns", () => {
+    const hints = discoverProjectRootHints(
+      [
+        { path: "pnpm-workspace.yaml", type: "file" },
+        { path: "apps/web/package.json", type: "file" },
+        { path: "packages/utils/package.json", type: "file" },
+      ],
+      { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n  - 'packages/*'\n" },
+    );
+
+    expect(hints).toContainEqual({ rootDirectory: "apps/web", source: "workspace" });
+    expect(hints).toContainEqual({ rootDirectory: "packages/utils", source: "workspace" });
+  });
+
+  it("pnpm-workspace.yaml with deep ** patterns", () => {
+    const hints = discoverProjectRootHints(
+      [
+        { path: "pnpm-workspace.yaml", type: "file" },
+        { path: "products/billing/api/package.json", type: "file" },
+        { path: "products/identity/web/package.json", type: "file" },
+      ],
+      { "pnpm-workspace.yaml": "packages:\n  - 'products/**'\n" },
+    );
+
+    expect(hints).toContainEqual({ rootDirectory: "products/billing/api", source: "workspace" });
+    expect(hints).toContainEqual({ rootDirectory: "products/identity/web", source: "workspace" });
+  });
+
+  it("turborepo: pnpm-workspace + turbo.json — workspace hints come from pnpm config", () => {
+    // turbo.json itself is not parsed for workspaces — turbo relies on
+    // package.json workspaces / pnpm-workspace. Verifying the hints flow.
+    const hints = discoverProjectRootHints(
+      [
+        { path: "package.json", type: "file" },
+        { path: "pnpm-workspace.yaml", type: "file" },
+        { path: "turbo.json", type: "file" },
+        { path: "apps/web/package.json", type: "file" },
+        { path: "apps/docs/package.json", type: "file" },
+        { path: "packages/ui/package.json", type: "file" },
+      ],
+      { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n  - 'packages/*'\n" },
+    );
+
+    expect(hints).toContainEqual({ rootDirectory: "apps/web", source: "workspace" });
+    expect(hints).toContainEqual({ rootDirectory: "apps/docs", source: "workspace" });
+    expect(hints).toContainEqual({ rootDirectory: "packages/ui", source: "workspace" });
+  });
+});
+
+// ─── Hint discovery for non-JS roots ─────────────────────────────────────────
+
+describe("discoverProjectRootHints — non-JS stacks", () => {
+  it("discovers a nested Python app via requirements.txt", () => {
+    const hints = discoverProjectRootHints([
+      { path: "package.json", type: "file" },
+      { path: "services/worker/requirements.txt", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "services/worker", source: "discovered" });
+  });
+
+  it("discovers a nested Go app via go.mod", () => {
+    const hints = discoverProjectRootHints([
+      { path: "api/go.mod", type: "file" },
+      { path: "api/main.go", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "api", source: "discovered" });
+  });
+
+  it("discovers a nested Rust app via Cargo.toml", () => {
+    const hints = discoverProjectRootHints([
+      { path: "services/engine/Cargo.toml", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "services/engine", source: "discovered" });
+  });
+
+  it("discovers a nested Rails app via Gemfile", () => {
+    const hints = discoverProjectRootHints([
+      { path: "apps/web/Gemfile", type: "file" },
+      { path: "apps/web/config/routes.rb", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "apps/web", source: "discovered" });
+  });
+
+  it("discovers a nested Django via manage.py", () => {
+    const hints = discoverProjectRootHints([
+      { path: "backend/manage.py", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "backend", source: "discovered" });
+  });
+
+  it("discovers a nested static site via index.html", () => {
+    const hints = discoverProjectRootHints([
+      { path: "marketing/index.html", type: "file" },
+      { path: "marketing/style.css", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "marketing", source: "discovered" });
+  });
+
+  it("discovers a nested Dockerfile-based service", () => {
+    const hints = discoverProjectRootHints([
+      { path: "services/worker/Dockerfile", type: "file" },
+    ]);
+    expect(hints).toContainEqual({ rootDirectory: "services/worker", source: "discovered" });
+  });
+});
+
+// ─── Ignored-directory hygiene ───────────────────────────────────────────────
+
+describe("discoverProjectRootHints — ignored directories", () => {
+  it("skips package.json files inside node_modules", () => {
+    const hints = discoverProjectRootHints([
+      { path: "package.json", type: "file" },
+      { path: "node_modules/lodash/package.json", type: "file" },
+      { path: "node_modules/.pnpm/some-pkg/node_modules/foo/package.json", type: "file" },
+    ]);
+    expect(hints.some((h) => h.rootDirectory.includes("node_modules"))).toBe(false);
+  });
+
+  it("skips entries inside .git, .next, .turbo, dist, build, target, out", () => {
+    const hints = discoverProjectRootHints([
+      { path: ".next/server/package.json", type: "file" },
+      { path: ".turbo/cache/package.json", type: "file" },
+      { path: "build/package.json", type: "file" },
+      { path: "dist/manifest.json", type: "file" },
+      { path: "out/index.html", type: "file" },
+      { path: "target/debug/package.json", type: "file" },
+    ]);
+    expect(hints).toEqual([]);
+  });
+
+  it("skips entries inside .venv and __pycache__", () => {
+    const hints = discoverProjectRootHints([
+      { path: ".venv/lib/python3.12/site-packages/foo/pyproject.toml", type: "file" },
+      { path: "__pycache__/something/requirements.txt", type: "file" },
+    ]);
+    expect(hints).toEqual([]);
+  });
+
+  it("does not include the root itself ('.' dirname) as a hint", () => {
+    // A top-level next.config.js has dirname "." → normalized to "" → skipped.
+    const hints = discoverProjectRootHints([
+      { path: "next.config.js", type: "file" },
+    ]);
+    expect(hints.every((h) => h.rootDirectory !== "")).toBe(true);
+  });
+});
+
+// ─── Vercel.json parsing edge cases ──────────────────────────────────────────
+
+describe("parseVercelRootDirectories", () => {
+  it("extracts directory from buildCommand 'cd <dir> && npm run build'", () => {
+    expect(parseVercelRootDirectories(JSON.stringify({
+      buildCommand: "cd frontend && npm run build",
+    }))).toContain("frontend");
+  });
+
+  it("extracts directory from outputDirectory parent", () => {
+    expect(parseVercelRootDirectories(JSON.stringify({
+      outputDirectory: "apps/web/dist",
+    }))).toContain("apps/web");
+  });
+
+  it("rejects '..' escape attempts", () => {
+    expect(parseVercelRootDirectories(JSON.stringify({
+      buildCommand: "cd ../sibling && npm run build",
+    }))).not.toContain("..");
+    expect(parseVercelRootDirectories(JSON.stringify({
+      buildCommand: "cd .. && npm run build",
+    }))).toEqual([]);
+  });
+
+  it("rejects ignored dir candidates (node_modules, .next, etc.)", () => {
+    expect(parseVercelRootDirectories(JSON.stringify({
+      buildCommand: "cd node_modules/whatever && npm run build",
+    }))).toEqual([]);
+  });
+
+  it("ignores 'dist' as an outputDirectory (dirname is '.', no useful hint)", () => {
+    // When outputDirectory is a bare filename like "dist", dirname() returns "."
+    // which doesn't point at any subdirectory — discard.
+    expect(parseVercelRootDirectories(JSON.stringify({
+      outputDirectory: "dist",
+    }))).toEqual([]);
+  });
+
+  it("returns empty for invalid JSON", () => {
+    expect(parseVercelRootDirectories("{not json")).toEqual([]);
+  });
+
+  it("returns empty for empty input", () => {
+    expect(parseVercelRootDirectories(undefined)).toEqual([]);
+    expect(parseVercelRootDirectories("")).toEqual([]);
+  });
+
+  it("handles multiple cd-into-dir patterns in one buildCommand", () => {
+    const dirs = parseVercelRootDirectories(JSON.stringify({
+      buildCommand: "cd packages/ui && npm run build && cd apps/web && npm run build",
+    }));
+    expect(dirs).toContain("packages/ui");
+    expect(dirs).toContain("apps/web");
+  });
+});
+
+// ─── Selector behavior — single-app vs services dual mode ────────────────────
+
+describe("selectPreferredProjectRoot — single-app monorepo scenarios", () => {
+  it("promotes apps/web in a pnpm monorepo with a backend root", () => {
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "pnpm-workspace.yaml", type: "file" as const },
+      ],
+      packageJson: {
+        dependencies: { express: "^5.0.0" },
+        scripts: { start: "node server.js" },
+      },
+      fileContents: { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n  - 'packages/*'\n" },
+    };
+    const candidate = {
+      rootDirectory: "apps/web",
+      source: "workspace" as const,
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "next.config.js", type: "file" as const },
+        { name: "src", type: "dir" as const },
+      ],
+      packageJson: {
+        dependencies: { next: "^15.0.0", react: "^19.0.0" },
+        scripts: { build: "next build", start: "next start" },
+      },
+      fileContents: {},
+    };
+
+    const selected = selectPreferredProjectRoot(root, [candidate]);
+    expect(selected.rootDirectory).toBe("apps/web");
+    expect(selected.stack.stack).toBe("nextjs");
+  });
+
+  it("keeps root when root is already a fullstack app (Next.js) even with workspace apps below", () => {
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "next.config.js", type: "file" as const },
+        { name: "apps", type: "dir" as const },
+      ],
+      packageJson: {
+        dependencies: { next: "^15.0.0", react: "^19.0.0" },
+        scripts: { build: "next build", start: "next start" },
+        workspaces: ["apps/*"],
+      },
+      fileContents: {},
+    };
+    const nestedApp = {
+      rootDirectory: "apps/web",
+      source: "workspace" as const,
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "vite.config.ts", type: "file" as const },
+      ],
+      packageJson: {
+        dependencies: { vite: "^5.0.0", react: "^19.0.0" },
+        scripts: { build: "vite build" },
+      },
+      fileContents: {},
+    };
+
+    const selected = selectPreferredProjectRoot(root, [nestedApp]);
+    expect(selected.rootDirectory).toBe("");
+    expect(selected.stack.stack).toBe("nextjs");
+  });
+
+  it("picks the highest-scored app among multiple workspace candidates", () => {
+    // Two apps: one with build script + public/, one without. The one with
+    // production signals should win via scoreCandidate.
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "pnpm-workspace.yaml", type: "file" as const },
+      ],
+      packageJson: { workspaces: ["apps/*"] },
+      fileContents: { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n" },
+    };
+
+    const winner = {
+      rootDirectory: "apps/web",
+      source: "workspace" as const,
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "next.config.js", type: "file" as const },
+        { name: "public", type: "dir" as const },
+        { name: "src", type: "dir" as const },
+        { name: "index.html", type: "file" as const },
+      ],
+      packageJson: {
+        dependencies: { next: "^15.0.0" },
+        scripts: { build: "next build" },
+      },
+      fileContents: {},
+    };
+
+    const loser = {
+      rootDirectory: "apps/internal",
+      source: "workspace" as const,
+      files: [{ name: "package.json", type: "file" as const }],
+      packageJson: {
+        dependencies: { express: "^5.0.0" },
+        // No build script, no production indicators.
+      },
+      fileContents: {},
+    };
+
+    const selected = selectPreferredProjectRoot(root, [loser, winner]);
+    expect(selected.rootDirectory).toBe("apps/web");
+  });
+});
+
+describe("selectPreferredSingleAppRoot — services-with-app dual mode", () => {
+  it("returns null when root is not a services project", () => {
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "next.config.js", type: "file" as const },
+      ],
+      packageJson: { dependencies: { next: "^15.0.0" } },
+      fileContents: {},
+    };
+    const candidate = {
+      rootDirectory: "apps/admin",
+      source: "workspace" as const,
+      files: [{ name: "package.json", type: "file" as const }, { name: "vite.config.ts", type: "file" as const }],
+      packageJson: { dependencies: { vite: "^5.0.0", react: "^19.0.0" } },
+      fileContents: {},
+    };
+    expect(selectPreferredSingleAppRoot(root, [candidate])).toBeNull();
+  });
+
+  it("returns the nested vite app when root is docker-compose", () => {
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "docker-compose.yml", type: "file" as const },
+        { name: "apps", type: "dir" as const },
+      ],
+      fileContents: {},
+    };
+    const candidate = {
+      rootDirectory: "apps/web",
+      source: "discovered" as const,
+      files: [{ name: "package.json", type: "file" as const }, { name: "vite.config.ts", type: "file" as const }],
+      packageJson: { dependencies: { vite: "^5.0.0", react: "^19.0.0" } },
+      fileContents: {},
+    };
+    const result = selectPreferredSingleAppRoot(root, [candidate]);
+    expect(result?.rootDirectory).toBe("apps/web");
+    expect(result?.stack.stack).toBe("vite");
+  });
+});
+
+describe("applyWorkspaceContext — install command rewriting", () => {
+  it("rewrites pnpm install with the right depth (apps/web → ../..)", () => {
+    const adjusted = applyWorkspaceContext(
+      {
+        rootDirectory: "",
+        files: [
+          { name: "package.json", type: "file" as const },
+          { name: "pnpm-workspace.yaml", type: "file" as const },
+          { name: "pnpm-lock.yaml", type: "file" as const },
+        ],
+        packageJson: {
+          packageManager: "pnpm@9.0.0",
+          workspaces: ["apps/*"],
+        },
+        fileContents: { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n" },
+      },
+      selectPreferredProjectRoot(
+        {
+          rootDirectory: "",
+          files: [
+            { name: "package.json", type: "file" as const },
+            { name: "pnpm-workspace.yaml", type: "file" as const },
+            { name: "pnpm-lock.yaml", type: "file" as const },
+          ],
+          packageJson: { packageManager: "pnpm@9.0.0", workspaces: ["apps/*"] },
+          fileContents: { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n" },
+        },
+        [
+          {
+            rootDirectory: "apps/web",
+            source: "workspace" as const,
+            files: [
+              { name: "package.json", type: "file" as const },
+              { name: "next.config.js", type: "file" as const },
+            ],
+            packageJson: {
+              name: "web",
+              dependencies: { next: "^15.0.0" },
+              scripts: { build: "next build", start: "next start" },
+            },
+            fileContents: {},
+          },
+        ],
+      ),
+    );
+
+    expect(adjusted.stack.packageManager).toBe("pnpm");
+    expect(adjusted.stack.installCommand).toBe("cd ../.. && pnpm install");
+  });
+
+  it("rewrites yarn install at a 3-deep nested workspace (products/web/admin → ../../..)", () => {
+    const root = {
+      rootDirectory: "",
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "yarn.lock", type: "file" as const },
+      ],
+      packageJson: { workspaces: ["products/**"] },
+      fileContents: {},
+    };
+
+    const selectedRoot = selectPreferredProjectRoot(root, [
+      {
+        rootDirectory: "products/web/admin",
+        source: "workspace" as const,
+        files: [
+          { name: "package.json", type: "file" as const },
+          { name: "vite.config.ts", type: "file" as const },
+        ],
+        packageJson: {
+          dependencies: { vite: "^5.0.0", react: "^19.0.0" },
+          scripts: { build: "vite build" },
+        },
+        fileContents: {},
+      },
+    ]);
+
+    const adjusted = applyWorkspaceContext(root, selectedRoot);
+    expect(adjusted.stack.packageManager).toBe("yarn");
+    expect(adjusted.stack.installCommand).toBe("cd ../../.. && yarn install");
+  });
+
+  it("does not rewrite when there is no workspace context", () => {
+    const root = {
+      rootDirectory: "",
+      files: [{ name: "package.json", type: "file" as const }],
+      packageJson: { dependencies: { next: "^15.0.0" } },
+      fileContents: {},
+    };
+
+    const selectedRoot = selectPreferredProjectRoot(root, []);
+    const adjusted = applyWorkspaceContext(root, selectedRoot);
+    expect(adjusted.stack.installCommand).not.toContain("cd");
   });
 });

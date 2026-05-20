@@ -126,6 +126,36 @@ export type ProjectType = "app" | "docker" | "services";
 
 // ─── Stack definition ────────────────────────────────────────────────────────
 
+/**
+ * Detection inputs for a stack. Used by both `detectStack` (which framework is this?)
+ * and `project-root-detector` (where in the tree is a deployable project?).
+ *
+ * Keep this declarative — every stack adds exactly one entry here, and both the
+ * framework-rule list and the root-marker set derive from it. If you find yourself
+ * adding fileMatch/depMatch overrides in `stack-detector.ts`, that's a sign the
+ * stack has irregular detection (e.g. negations or conjunctions) — fine, but
+ * `rootMarkers` here must still list the project-root signals.
+ */
+export interface StackDetection {
+  /**
+   * Files whose presence at a directory marks that directory as a candidate
+   * project root for this stack. Lowercased basenames; nested-path markers
+   * (e.g. "config/routes.rb") are also accepted and matched verbatim.
+   */
+  rootMarkers?: readonly string[];
+  /**
+   * Dependency names (from package.json / requirements.txt / go.mod / Cargo.toml /
+   * Gemfile / composer.json / mix.exs) whose presence implies this stack.
+   */
+  deps?: readonly string[];
+  /**
+   * Filename → regex source pairs. If the file content matches, the stack is
+   * implied. Used when a stack can't be discriminated by deps alone
+   * (e.g. Spring Boot in build.gradle).
+   */
+  contentPatterns?: Readonly<Record<string, string>>;
+}
+
 export interface StackDefinition {
   /** Human-readable display name */
   name: string;
@@ -164,6 +194,11 @@ export interface StackDefinition {
    * "local"  = build on the host machine, then transfer the artifact.
    */
   defaultBuildStrategy?: "server" | "local";
+  /**
+   * Detection signals — files / deps / content patterns. Consumed by
+   * `stack-detector.ts` and `project-root-detector.ts`. See {@link StackDetection}.
+   */
+  detection?: StackDetection;
 }
 
 // ─── The registry ────────────────────────────────────────────────────────────
@@ -183,6 +218,10 @@ export const STACKS = {
     requiredToolVersions: { node: "20.9.0" },
     cacheDirs: [".next/cache"],
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["next.config.js", "next.config.mjs", "next.config.ts"],
+      deps: ["next"],
+    },
   },
   nuxt: {
     name: "Nuxt",
@@ -194,6 +233,10 @@ export const STACKS = {
     defaultStartCommand: "node .output/server/index.mjs",
     cacheDirs: [".nuxt"],
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["nuxt.config.js", "nuxt.config.ts", "nuxt.config.mjs"],
+      deps: ["nuxt", "@nuxt/core"],
+    },
   },
   sveltekit: {
     name: "SvelteKit",
@@ -204,6 +247,10 @@ export const STACKS = {
     defaultBuildCommand: "vite build",
     defaultStartCommand: "node build/index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["svelte.config.js", "svelte.config.mjs"],
+      deps: ["svelte", "@sveltejs/kit"],
+    },
   },
   remix: {
     name: "Remix",
@@ -214,6 +261,10 @@ export const STACKS = {
     defaultBuildCommand: "remix build",
     defaultStartCommand: "remix-serve build/index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["remix.config.js", "remix.config.ts"],
+      deps: ["@remix-run/react", "@remix-run/node", "remix"],
+    },
   },
   astro: {
     name: "Astro",
@@ -224,6 +275,10 @@ export const STACKS = {
     defaultBuildCommand: "astro build",
     defaultStartCommand: "node dist/server/entry.mjs",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["astro.config.mjs", "astro.config.js", "astro.config.ts"],
+      deps: ["astro"],
+    },
   },
   vite: {
     name: "Vite",
@@ -234,6 +289,10 @@ export const STACKS = {
     defaultBuildCommand: "vite build",
     defaultStartCommand: "",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["vite.config.js", "vite.config.ts", "vite.config.mjs"],
+      deps: ["vite"],
+    },
   },
   angular: {
     name: "Angular",
@@ -244,6 +303,10 @@ export const STACKS = {
     defaultBuildCommand: "ng build --configuration production",
     defaultStartCommand: "",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["angular.json"],
+      deps: ["@angular/core"],
+    },
   },
   gatsby: {
     name: "Gatsby",
@@ -255,6 +318,10 @@ export const STACKS = {
     defaultStartCommand: "gatsby serve",
     cacheDirs: [".cache"],
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["gatsby-config.js", "gatsby-config.ts"],
+      deps: ["gatsby"],
+    },
   },
   cra: {
     name: "Create React App",
@@ -265,6 +332,11 @@ export const STACKS = {
     defaultBuildCommand: "react-scripts build",
     defaultStartCommand: "",
     defaultBuildStrategy: "local",
+    detection: {
+      // CRA's only durable signal is the react-scripts dep; the public+src
+      // layout is shared with many other React setups.
+      deps: ["react-scripts"],
+    },
   },
   vue: {
     name: "Vue CLI",
@@ -275,6 +347,11 @@ export const STACKS = {
     defaultBuildCommand: "vue-cli-service build",
     defaultStartCommand: "",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["vue.config.js", "vue.config.ts"],
+      // Note: deps gate is the disambiguator vs. Nuxt — checked in stack-detector.
+      deps: ["vue"],
+    },
   },
   react: {
     name: "React",
@@ -298,6 +375,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "node index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      deps: ["express"],
+    },
   },
   fastify: {
     name: "Fastify",
@@ -308,6 +388,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "node dist/index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      deps: ["fastify"],
+    },
   },
   hono: {
     name: "Hono",
@@ -318,6 +401,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "node dist/index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      deps: ["hono"],
+    },
   },
   nestjs: {
     name: "NestJS",
@@ -328,6 +414,10 @@ export const STACKS = {
     defaultBuildCommand: "nest build",
     defaultStartCommand: "node dist/main.js",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["nest-cli.json"],
+      deps: ["@nestjs/core"],
+    },
   },
   koa: {
     name: "Koa",
@@ -338,6 +428,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "node index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      deps: ["koa"],
+    },
   },
   adonis: {
     name: "AdonisJS",
@@ -348,6 +441,10 @@ export const STACKS = {
     defaultBuildCommand: "node ace build --production",
     defaultStartCommand: "node build/server.js",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["ace.js", ".adonisrc.json", "adonisrc.ts"],
+      deps: ["@adonisjs/core"],
+    },
   },
   elysia: {
     name: "Elysia",
@@ -358,6 +455,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "bun dist/index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      deps: ["elysia"],
+    },
   },
 
   // ── Go ─────────────────────────────────────────────────────────────────────
@@ -371,6 +471,9 @@ export const STACKS = {
     defaultBuildCommand: "go build -o app .",
     defaultStartCommand: "./app",
     productionPaths: ["app"],
+    detection: {
+      rootMarkers: ["go.mod"],
+    },
   },
   gin: {
     name: "Gin",
@@ -381,6 +484,10 @@ export const STACKS = {
     defaultBuildCommand: "go build -o app .",
     defaultStartCommand: "./app",
     productionPaths: ["app"],
+    detection: {
+      rootMarkers: ["go.mod"],
+      deps: ["github.com/gin-gonic/gin"],
+    },
   },
   fiber: {
     name: "Fiber",
@@ -391,6 +498,10 @@ export const STACKS = {
     defaultBuildCommand: "go build -o app .",
     defaultStartCommand: "./app",
     productionPaths: ["app"],
+    detection: {
+      rootMarkers: ["go.mod"],
+      deps: ["github.com/gofiber/fiber"],
+    },
   },
   echo: {
     name: "Echo",
@@ -401,6 +512,10 @@ export const STACKS = {
     defaultBuildCommand: "go build -o app .",
     defaultStartCommand: "./app",
     productionPaths: ["app"],
+    detection: {
+      rootMarkers: ["go.mod"],
+      deps: ["github.com/labstack/echo"],
+    },
   },
 
   // ── Rust ───────────────────────────────────────────────────────────────────
@@ -414,6 +529,9 @@ export const STACKS = {
     defaultBuildCommand: "cargo build --release",
     defaultStartCommand: "./target/release/app",
     productionPaths: ["target/release/app"],
+    detection: {
+      rootMarkers: ["Cargo.toml"],
+    },
   },
   actix: {
     name: "Actix Web",
@@ -424,6 +542,10 @@ export const STACKS = {
     defaultBuildCommand: "cargo build --release",
     defaultStartCommand: "./target/release/app",
     productionPaths: ["target/release/app"],
+    detection: {
+      rootMarkers: ["Cargo.toml"],
+      deps: ["actix-web"],
+    },
   },
   axum: {
     name: "Axum",
@@ -434,6 +556,10 @@ export const STACKS = {
     defaultBuildCommand: "cargo build --release",
     defaultStartCommand: "./target/release/app",
     productionPaths: ["target/release/app"],
+    detection: {
+      rootMarkers: ["Cargo.toml"],
+      deps: ["axum"],
+    },
   },
   rocket: {
     name: "Rocket",
@@ -444,6 +570,10 @@ export const STACKS = {
     defaultBuildCommand: "cargo build --release",
     defaultStartCommand: "./target/release/app",
     productionPaths: ["target/release/app"],
+    detection: {
+      rootMarkers: ["Cargo.toml"],
+      deps: ["rocket"],
+    },
   },
 
   // ── Python ─────────────────────────────────────────────────────────────────
@@ -456,6 +586,9 @@ export const STACKS = {
     defaultPort: 8000,
     defaultBuildCommand: "pip install -r requirements.txt",
     defaultStartCommand: "python app.py",
+    detection: {
+      rootMarkers: ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"],
+    },
   },
   django: {
     name: "Django",
@@ -465,6 +598,9 @@ export const STACKS = {
     defaultPort: 8000,
     defaultBuildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput",
     defaultStartCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:8000",
+    detection: {
+      rootMarkers: ["manage.py"],
+    },
   },
   flask: {
     name: "Flask",
@@ -474,6 +610,10 @@ export const STACKS = {
     defaultPort: 5000,
     defaultBuildCommand: "pip install -r requirements.txt",
     defaultStartCommand: "gunicorn app:app --bind 0.0.0.0:5000",
+    detection: {
+      rootMarkers: ["requirements.txt", "pyproject.toml", "Pipfile"],
+      deps: ["flask", "Flask"],
+    },
   },
   fastapi: {
     name: "FastAPI",
@@ -483,6 +623,10 @@ export const STACKS = {
     defaultPort: 8000,
     defaultBuildCommand: "pip install -r requirements.txt",
     defaultStartCommand: "uvicorn main:app --host 0.0.0.0 --port 8000",
+    detection: {
+      rootMarkers: ["requirements.txt", "pyproject.toml", "Pipfile"],
+      deps: ["fastapi", "FastAPI"],
+    },
   },
 
   // ── Ruby ───────────────────────────────────────────────────────────────────
@@ -495,6 +639,11 @@ export const STACKS = {
     defaultPort: 3000,
     defaultBuildCommand: "bundle install && bundle exec rails assets:precompile",
     defaultStartCommand: "bundle exec rails server -b 0.0.0.0",
+    detection: {
+      // Rails: Gemfile is required; bin/rails or config/routes.rb confirms.
+      // The conjunction is encoded as an override in stack-detector.
+      rootMarkers: ["Gemfile", "bin/rails", "config/routes.rb"],
+    },
   },
   sinatra: {
     name: "Sinatra",
@@ -504,6 +653,10 @@ export const STACKS = {
     defaultPort: 4567,
     defaultBuildCommand: "bundle install",
     defaultStartCommand: "ruby app.rb",
+    detection: {
+      rootMarkers: ["Gemfile"],
+      deps: ["sinatra"],
+    },
   },
 
   // ── PHP ────────────────────────────────────────────────────────────────────
@@ -517,6 +670,10 @@ export const STACKS = {
     defaultPort: 8000,
     defaultBuildCommand: "composer install --no-dev --optimize-autoloader",
     defaultStartCommand: "php artisan serve --host=0.0.0.0 --port=8000",
+    detection: {
+      rootMarkers: ["artisan", "composer.json"],
+      deps: ["laravel/framework"],
+    },
   },
   symfony: {
     name: "Symfony",
@@ -527,6 +684,10 @@ export const STACKS = {
     defaultPort: 8000,
     defaultBuildCommand: "composer install --no-dev --optimize-autoloader",
     defaultStartCommand: "php -S 0.0.0.0:8000 -t public",
+    detection: {
+      rootMarkers: ["composer.json", "symfony.lock"],
+      deps: ["symfony/framework-bundle"],
+    },
   },
 
   // ── Java / JVM ─────────────────────────────────────────────────────────────
@@ -541,6 +702,15 @@ export const STACKS = {
     defaultStartCommand: "java -jar target/*.jar",
     productionPaths: ["target"],
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["pom.xml", "build.gradle", "build.gradle.kts"],
+      deps: ["org.springframework.boot:spring-boot-starter-web", "spring-boot"],
+      contentPatterns: {
+        "pom.xml": "spring[-.]boot",
+        "build.gradle": "spring[-.]boot",
+        "build.gradle.kts": "spring[-.]boot",
+      },
+    },
   },
   quarkus: {
     name: "Quarkus",
@@ -552,6 +722,15 @@ export const STACKS = {
     defaultStartCommand: "java -jar target/quarkus-app/quarkus-run.jar",
     productionPaths: ["target"],
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["pom.xml", "build.gradle", "build.gradle.kts"],
+      deps: ["io.quarkus:quarkus-core", "quarkus"],
+      contentPatterns: {
+        "pom.xml": "io\\.quarkus",
+        "build.gradle": "io\\.quarkus",
+        "build.gradle.kts": "io\\.quarkus",
+      },
+    },
   },
 
   // ── C# / .NET ──────────────────────────────────────────────────────────────
@@ -565,6 +744,10 @@ export const STACKS = {
     defaultBuildCommand: "dotnet publish -c Release -o publish",
     defaultStartCommand: "dotnet publish/app.dll",
     productionPaths: ["publish"],
+    detection: {
+      // .csproj/.fsproj/.sln are detected by suffix; rootMarkers is decorative
+      // here since the suffix-match lives in stack-detector.
+    },
   },
   blazor: {
     name: "Blazor",
@@ -575,6 +758,9 @@ export const STACKS = {
     defaultBuildCommand: "dotnet publish -c Release -o publish",
     defaultStartCommand: "dotnet publish/app.dll",
     productionPaths: ["publish"],
+    detection: {
+      deps: ["Microsoft.AspNetCore.Components.WebAssembly"],
+    },
   },
 
   // ── Elixir ─────────────────────────────────────────────────────────────────
@@ -588,6 +774,10 @@ export const STACKS = {
     defaultBuildCommand: "MIX_ENV=prod mix do deps.get, compile, assets.deploy, release",
     defaultStartCommand: "_build/prod/rel/app/bin/app start",
     productionPaths: ["_build/prod/rel"],
+    detection: {
+      rootMarkers: ["mix.exs"],
+      deps: ["phoenix"],
+    },
   },
 
   // ── Generic ────────────────────────────────────────────────────────────────
@@ -601,6 +791,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "node index.js",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["package.json"],
+    },
   },
   static: {
     name: "Static Site",
@@ -612,6 +805,9 @@ export const STACKS = {
     defaultBuildCommand: "",
     defaultStartCommand: "",
     defaultBuildStrategy: "local",
+    detection: {
+      rootMarkers: ["index.html"],
+    },
   },
   docker: {
     name: "Dockerfile",
@@ -621,6 +817,9 @@ export const STACKS = {
     defaultPort: 3000,
     defaultBuildCommand: "",
     defaultStartCommand: "",
+    detection: {
+      rootMarkers: ["Dockerfile"],
+    },
   },
   "docker-compose": {
     name: "Docker Compose",
@@ -630,6 +829,9 @@ export const STACKS = {
     defaultPort: 3000,
     defaultBuildCommand: "",
     defaultStartCommand: "",
+    detection: {
+      rootMarkers: ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"],
+    },
   },
   unknown: {
     name: "Unknown",
@@ -667,6 +869,18 @@ export const TRANSFER_EXCLUDES: readonly string[] = ["node_modules", ".git", ".t
 /** Output directories keyed by stack — derived from STACKS */
 export const OUTPUT_DIRECTORIES: Record<string, string> = Object.fromEntries(
   Object.entries(STACKS).map(([id, s]) => [id, s.outputDirectory]),
+);
+
+/**
+ * Every filename that any stack uses as a project-root marker, lowercased.
+ * Project-root-detector unions this with workspace/build-tool markers to discover
+ * candidate roots in a repo tree. Adding a stack with `detection.rootMarkers`
+ * automatically flows here — no parallel list to maintain.
+ */
+export const STACK_ROOT_MARKERS: ReadonlySet<string> = new Set(
+  Object.values(STACKS)
+    .flatMap((stack) => (stack as StackDefinition).detection?.rootMarkers ?? [])
+    .map((marker) => marker.toLowerCase()),
 );
 
 /** JS/TS languages that should use oven/bun when the package manager is bun */

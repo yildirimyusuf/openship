@@ -56,12 +56,16 @@ export function DarkSection({
     }
 
     /* ── Desktop: set initial state (prevents flash) ── */
-    inner.style.transform = "scale(0.88)";
     inner.style.transformOrigin = "top center";
-    outer.style.opacity = "0.7";
     outer.style.marginTop = "-1rem";
     outer.style.willChange = "transform, opacity";
     inner.style.willChange = "transform";
+
+    /* Synchronous measure so the first paint already includes the
+     * scale-compensating margin. Without this, the first ScrollTrigger
+     * onUpdate would snap translateY/marginBottom and cause a visible
+     * jump-down before the scroll has actually moved. */
+    heightRef.current = inner.offsetHeight;
 
     /* ── Mutable animation values (closure, no state) ── */
     let scaleIn = 0.88;
@@ -80,6 +84,11 @@ export function DarkSection({
       outer.style.transform = `translateY(${yIn}px)`;
       outer.style.marginBottom = `${-(heightRef.current * (1 - s))}px`;
     };
+
+    /* Paint the initial state through apply() — translateY, opacity,
+     * scale and marginBottom all land in one consistent frame, matching
+     * what the first ScrollTrigger update will compute. */
+    apply();
 
     let ctx: gsap.Context | undefined;
 

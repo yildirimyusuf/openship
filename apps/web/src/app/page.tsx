@@ -1,18 +1,13 @@
 import {
   Navbar,
   Hero,
-  Features,
   Dashboard,
-  HowItWorks,
-  WhyOpenship,
-  DeveloperExperience,
-  NoLockin,
-  Scaling,
-  Backups,
-  Portability,
-  Infrastructure,
-  OpenSourceCta,
-  ComingSoon,
+  Features,
+  DeploymentModels,
+  CompletePlatform,
+  MailServer,
+  Comparison,
+  OpenSource,
   FinalCta,
   Footer,
 } from "@/components/landing";
@@ -23,18 +18,13 @@ export default function HomePage() {
       <Navbar />
       <main>
         <Hero />
-        <Features />
         <Dashboard />
-        <HowItWorks />
-        <WhyOpenship />
-        <DeveloperExperience />
-        <NoLockin />
-        <Scaling />
-        <Backups />
-        <Portability />
-        <Infrastructure />
-        <OpenSourceCta />
-        <ComingSoon />
+        <Features />
+        <DeploymentModels />
+        <CompletePlatform />
+        <MailServer />
+        <Comparison />
+        <OpenSource />
         <FinalCta />
       </main>
       <Footer />

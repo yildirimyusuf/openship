@@ -22,7 +22,7 @@ const footerLinks = {
   Legal: [
     { label: "Privacy", href: "/privacy" },
     { label: "Terms", href: "/terms" },
-    { label: "License (MIT)", href: "https://github.com/oblien/openship/blob/main/LICENSE" },
+    { label: "License (AGPL-3)", href: "https://github.com/oblien/openship/blob/main/LICENSE" },
   ],
 };
 
