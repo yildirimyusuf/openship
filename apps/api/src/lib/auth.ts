@@ -7,7 +7,7 @@ import { defaultStatements } from "better-auth/plugins/organization/access";
 import { createAccessControl } from "better-auth/plugins/access";
 import { db, getDriver, repos, schema } from "@repo/db";
 import { env, runtimeTarget, trustedOrigins } from "../config/env";
-import { sendMail, smtpEnabled } from "./mail";
+import { sendMail, smtpEnabled, requireEmailVerificationStrict } from "./mail";
 import {
   resetPasswordEmail,
   verifyEmailTemplate,
@@ -118,8 +118,10 @@ export const auth = betterAuth({
         }
       : undefined,
 
-    /* Email verification - only functional when SMTP is configured */
-    requireEmailVerification: smtpEnabled,
+    /* Email verification - only required when env SMTP is configured.
+       Platform-mailbox-only instances can sign up without verification
+       so a transient mail-server fault doesn't lock users out. */
+    requireEmailVerification: requireEmailVerificationStrict,
     sendVerificationEmail: smtpEnabled
       ? async ({ user, url }: { user: User; url: string; token: string }) => {
           const email = verifyEmailTemplate(user, url);
@@ -213,6 +215,33 @@ export const auth = betterAuth({
         },
       },
     },
+    session: {
+      create: {
+        before: async (session) => {
+          // Default activeOrganizationId to the user's deterministic
+          // personal org (`org_${userId}`) so the org plugin endpoints
+          // work without an explicit setActive call after sign-in.
+          //
+          // provisionUser guarantees this org + an owner membership
+          // exist for every identity before any session can be minted
+          // (it runs in user.create.after above, plus in
+          // mirrorCloudUser and ensureLocalUser), so this FK target
+          // is always valid.
+          //
+          // Only fires for sessions Better Auth's internal adapter
+          // creates (sign-in/sign-up/OAuth/refresh). The direct
+          // db.insert(schema.session) in createLocalSession bypasses
+          // Better Auth entirely and sets activeOrganizationId itself.
+          if (session.activeOrganizationId) return;
+          return {
+            data: {
+              ...session,
+              activeOrganizationId: `org_${session.userId}`,
+            },
+          };
+        },
+      },
+    },
   },
 
   /* ---------- Security ---------- */
@@ -291,7 +320,29 @@ export const auth = betterAuth({
               organizationName: data.organization.name,
               url: inviteUrl,
             });
-            await sendMail({ to: data.email, ...email });
+
+            // Per-instance source toggle. Default is "platform" — keep
+            // invites on our own SMTP identity. Operators on a
+            // cloud-only deployment can flip to "cloud" so the relay
+            // through /api/cloud/send-invitation on the SaaS owns
+            // delivery (sends from the SaaS's own mail infrastructure).
+            //
+            // The DB read is per-invite — invitations are rare and the
+            // round-trip lets operators flip the toggle without
+            // bouncing the API.
+            const settings = await repos.instanceSettings.get();
+            const source = settings?.invitationMailSource === "cloud" ? "cloud" : "platform";
+
+            await sendMail({
+              to: data.email,
+              preferSource: source,
+              // organizationId is required by lib/mail.ts when
+              // preferSource === "cloud" on a local instance — the
+              // cloudClient uses it to resolve the org owner's cloud
+              // session token. Harmless on the platform path.
+              organizationId: data.organization.id,
+              ...email,
+            });
           }
         : undefined,
 

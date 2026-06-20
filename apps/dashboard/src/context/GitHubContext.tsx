@@ -10,8 +10,14 @@ import React, {
 } from "react";
 import { githubApi } from "@/lib/api";
 import { endpoints } from "@/lib/api/endpoints";
-import { getApiBaseUrl } from "@/lib/api/client";
+import {
+  getApiBaseUrl,
+  getApiErrorMessage,
+  isAbortError,
+  isNetworkError,
+} from "@/lib/api/client";
 import { openAuthWindow } from "@/utils/authWindow";
+import { useToast } from "@/context/ToastContext";
 
 /* ── Types ────────────────────────────────────────────────────────── */
 
@@ -150,6 +156,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
   // global platform mode is owned by PlatformContext and read from
   // env.CLOUD_MODE during the initial dashboard layout. We deliberately
   // don't shadow it here.
+  const { showToast } = useToast();
   const [state, setState] = useState<GitHubConnectionState>(
     initialData?.state ?? EMPTY_STATE,
   );
@@ -199,12 +206,32 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         setAccounts([]);
         setRepos([]);
       }
-    } catch {
+
+      // Surface partial-failure diagnostics from the server. The request
+      // succeeded overall but one or more upstream fetches failed silently
+      // server-side — show them so the user has a clue why a section is
+      // empty (e.g. "App path failed: …" / "CLI repo merge failed: …").
+      if (res?.errors && typeof res.errors === "object") {
+        const entries = Object.entries(res.errors as Record<string, string>);
+        for (const [key, message] of entries) {
+          if (!message) continue;
+          showToast(`GitHub ${key}: ${message}`, "error", "GitHub");
+        }
+      }
+    } catch (err) {
+      // Defer transient network/abort errors to the global NetworkErrorHandler;
+      // only surface ApiError-shaped failures here.
+      if (isAbortError(err) || isNetworkError(err)) return;
       setState(EMPTY_STATE);
+      showToast(
+        getApiErrorMessage(err, "Couldn't load GitHub data"),
+        "error",
+        "GitHub",
+      );
     } finally {
       setLoading(false);
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── On mount ───────────────────────────────────────────────── */
   useEffect(() => {
@@ -272,10 +299,16 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         default:
           setConnecting(false);
       }
-    } catch {
+    } catch (err) {
       setConnecting(false);
+      if (isAbortError(err) || isNetworkError(err)) return;
+      showToast(
+        getApiErrorMessage(err, "Failed to connect to GitHub"),
+        "error",
+        "GitHub",
+      );
     }
-  }, [refresh]);
+  }, [refresh, showToast]);
 
   /* ── Disconnect GitHub ──────────────────────────────────────── */
   const disconnect = useCallback(
@@ -287,11 +320,16 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         // the other source connected (e.g. cli logged out but the
         // Openship App still installed).
         await refresh();
-      } catch {
-        /* silent */
+      } catch (err) {
+        if (isAbortError(err) || isNetworkError(err)) return;
+        showToast(
+          getApiErrorMessage(err, "Failed to disconnect from GitHub"),
+          "error",
+          "GitHub",
+        );
       }
     },
-    [refresh],
+    [refresh, showToast],
   );
 
   /* ── Device flow polling ────────────────────────────────────── */
@@ -307,12 +345,29 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
           refresh();
         } else if (res?.status === "error") {
           setCliAction(null);
+          showToast(
+            res?.message || res?.error || "GitHub device flow failed",
+            "error",
+            "GitHub",
+          );
         }
-      } catch { /* keep polling */ }
+      } catch (err) {
+        // Keep polling on transient failures. Only surface a non-network
+        // ApiError so the user sees terminal problems (e.g. expired code)
+        // instead of an interval that silently spins forever.
+        if (isAbortError(err) || isNetworkError(err)) return;
+        if (err instanceof Error && (err as any).status) {
+          showToast(
+            getApiErrorMessage(err, "GitHub device flow failed"),
+            "error",
+            "GitHub",
+          );
+        }
+      }
     }, interval);
 
     return () => clearInterval(timer);
-  }, [cliAction, refresh]);
+  }, [cliAction, refresh, showToast]);
 
   /* ── Fetch repos for an owner ───────────────────────────────── */
   const fetchReposForOwner = useCallback(
@@ -327,14 +382,30 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
           setRepos(list);
         } else {
           setRepos([]);
+          if (res?.error) {
+            showToast(
+              typeof res.error === "string" ? res.error : "Couldn't load repositories",
+              "error",
+              "GitHub",
+            );
+          }
         }
-      } catch {
+      } catch (err) {
         setRepos([]);
+        if (isAbortError(err) || isNetworkError(err)) {
+          setLoadingRepos(false);
+          return;
+        }
+        showToast(
+          getApiErrorMessage(err, "Couldn't load repositories"),
+          "error",
+          "GitHub",
+        );
       } finally {
         setLoadingRepos(false);
       }
     },
-    [connected]
+    [connected, showToast]
   );
 
   /* ── Owner change → fetch repos ─────────────────────────────── */

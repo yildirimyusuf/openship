@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { rateLimiter } from "../../middleware/rate-limiter";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudSessionAuth } from "./cloud-session-auth";
@@ -36,7 +37,38 @@ r.use("/analytics", cloudSessionAuth);
 r.post("/analytics", { tag: "cloud:write" }, saas.analyticsProxy);
 
 r.use("/pages", cloudSessionAuth);
+r.use("/pages/*", cloudSessionAuth);
 r.post("/pages", { tag: "cloud:write" }, saas.pagesProxy);
+r.post("/pages/disable", { tag: "cloud:write" }, saas.pagesDisable);
+r.post("/pages/enable", { tag: "cloud:write" }, saas.pagesEnable);
+r.post("/pages/delete", { tag: "cloud:write" }, saas.pagesDelete);
+
+r.use("/send-invitation", cloudSessionAuth);
+r.post("/send-invitation", { tag: "cloud:write" }, saas.sendInvitation);
+
+// Unified subgraph ingest/export — used by team-mode migration
+// Path B (org-scope) AND project transfer (project-scope). One pair
+// of endpoints handles both flows via the SubgraphScope discriminator.
+// Rate limit: defense against repeated junk ingest filling storage; bounded blast radius via remapOrgId but still operationally hostile
+r.use("/ingest-subgraph", rateLimiter);
+// 50MB body cap — subgraph dumps are bounded in practice (project/org scope, JSON rows);
+// reject oversized payloads BEFORE auth so DoS uploaders can't burn auth/DB cycles.
+r.use("/ingest-subgraph", bodyLimit({
+  maxSize: 50_000_000,
+  onError: (c) => c.json({
+    error: "Dump exceeds 50MB limit on this endpoint.",
+    code: "PAYLOAD_TOO_LARGE",
+  }, 413),
+}));
+r.use("/ingest-subgraph", cloudSessionAuth);
+r.post("/ingest-subgraph", { tag: "cloud:admin" }, saas.ingestSubgraphHandler);
+
+// Rate limit: throttle scope-enumeration / exfiltration attempts (a
+// compromised cloud session could otherwise loop over scopes to map
+// the caller's org out as fast as the API responds).
+r.use("/export-subgraph", rateLimiter);
+r.use("/export-subgraph", cloudSessionAuth);
+r.post("/export-subgraph", { tag: "cloud:admin" }, saas.exportSubgraphHandler);
 
 // ─── GitHub App proxy (cloud holds the App private key) ───────────────────
 // All endpoints below are what self-hosted instances call via cloud-client.

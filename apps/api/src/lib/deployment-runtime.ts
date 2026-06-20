@@ -95,6 +95,9 @@ async function resolveCloudPlatformForOrg(organizationId?: string): Promise<Plat
     cloudToken: result.token,
     cloudAdminProxy: {
       createPage: (input) => cloudClient({ organizationId }).pages.create(input),
+      disablePage: (slug) => cloudClient({ organizationId }).pages.disable(slug),
+      enablePage: (slug) => cloudClient({ organizationId }).pages.enable(slug),
+      deletePage: (slug) => cloudClient({ organizationId }).pages.delete(slug),
     },
   });
 }

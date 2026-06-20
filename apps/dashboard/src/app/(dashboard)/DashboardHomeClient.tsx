@@ -17,10 +17,9 @@ import {
   Activity,
   TrendingUp,
   CheckCircle2,
-  Building2,
-  ArrowRightLeft,
+  FolderPlus,
+  Github,
 } from "lucide-react";
-import { authClient } from "@/lib/auth-client";
 import { projectsApi } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import HomeTipCard from "@/components/overview/HomeTipCard";
@@ -65,7 +64,7 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
   const { t } = useI18n();
   const router = useRouter();
   
-  const { projects, numbers, otherOrgs, loading } = useDashboardHome(initialData);
+  const { projects, numbers, loading } = useDashboardHome(initialData);
 
   /* ---------- greeting ---------- */
   const hour = new Date().getHours();
@@ -135,138 +134,33 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
                     </div>
                   ))}
                 </div>
-              ) : projects.length === 0 && otherOrgs.length > 0 ? (
-                /* Cross-org hint — when active org is empty but the user has
-                   projects in another org they're a member of. One-click
-                   switch lands them in the right org via Better Auth's
-                   setActive + a full reload to refresh every context. */
-                <div className="px-5 py-5">
-                  <div className="rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/5 to-transparent p-5">
-                    <div className="flex items-start gap-3 mb-4">
-                      <div className="size-10 rounded-xl bg-primary/15 flex items-center justify-center shrink-0">
-                        <ArrowRightLeft className="size-5 text-primary" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-sm font-semibold text-foreground">
-                          Your projects are in another organization
-                        </h3>
-                        <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                          This org has no projects yet. You're a member of {otherOrgs.length === 1 ? "another organization that has" : `${otherOrgs.length} other organizations with`} projects — switch to view them.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {otherOrgs.map((o) => (
-                        <button
-                          key={o.organizationId}
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              const setActive = (
-                                authClient as unknown as {
-                                  organization: {
-                                    setActive: (opts: { organizationId: string }) => Promise<unknown>;
-                                  };
-                                }
-                              ).organization.setActive;
-                              await setActive({ organizationId: o.organizationId });
-                            } catch {
-                              /* fall through — reload still picks up server-side switch */
-                            }
-                            if (typeof window !== "undefined") window.location.reload();
-                          }}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-card hover:bg-muted/40 border border-border/40 hover:border-primary/40 transition-colors text-left"
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="size-8 rounded-lg bg-muted/40 flex items-center justify-center shrink-0">
-                              <Building2 className="size-4 text-muted-foreground" />
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-sm font-medium text-foreground truncate">{o.name}</p>
-                              <p className="text-xs text-muted-foreground">
-                                {o.projectCount} project{o.projectCount === 1 ? "" : "s"}
-                              </p>
-                            </div>
-                          </div>
-                          <ArrowRight className="size-4 text-muted-foreground shrink-0" />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
               ) : projects.length === 0 ? (
-                <div className="px-6 pb-10 text-center">
-                  {/* Enhanced SVG Illustration */}
-                  <div className="relative mx-auto w-64 h-44">
-                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 260 180" fill="none">
-                      {/* Background card stack effect */}
-                      <rect x="75" y="45" width="130" height="95" rx="14" fill="var(--th-sf-04)" />
-                      <rect x="65" y="35" width="130" height="95" rx="14" fill="var(--th-sf-03)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-                      <rect x="55" y="25" width="130" height="95" rx="14" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
-                      
-                      {/* Card content - header bar */}
-                      <rect x="55" y="25" width="130" height="28" rx="14" fill="var(--th-sf-05)" />
-                      <circle cx="72" cy="39" r="4" fill="#ef4444" fillOpacity="0.6" />
-                      <circle cx="84" cy="39" r="4" fill="#eab308" fillOpacity="0.6" />
-                      <circle cx="96" cy="39" r="4" fill="#22c55e" fillOpacity="0.6" />
-                      
-                      {/* Content placeholder lines */}
-                      <rect x="70" y="65" width="50" height="5" rx="2.5" fill="var(--th-on-12)" />
-                      <rect x="70" y="76" width="85" height="4" rx="2" fill="var(--th-on-08)" />
-                      <rect x="70" y="85" width="65" height="4" rx="2" fill="var(--th-on-08)" />
-                      
-                      {/* Folder/Project icon */}
-                      <rect x="70" y="100" width="28" height="22" rx="5" fill="var(--th-on-05)" stroke="var(--th-on-10)" strokeWidth="1" />
-                      <path d="M74 105h8l2.5 2.5h9.5v11H74V105z" fill="var(--th-on-10)" />
-                      
-                      {/* Animated plus button */}
-                      <circle cx="210" cy="90" r="22" fill="var(--th-on-05)" />
-                      <circle cx="210" cy="90" r="16" fill="var(--th-card-bg)" stroke="var(--th-on-20)" strokeWidth="2" strokeDasharray="4 3" />
-                      <path d="M210 82v16M202 90h16" stroke="var(--th-on-40)" strokeWidth="2" strokeLinecap="round" />
-                      
-                      {/* Decorative elements */}
-                      <circle cx="30" cy="60" r="4" fill="var(--th-on-10)" />
-                      <circle cx="40" cy="140" r="6" fill="var(--th-on-08)" />
-                      <circle cx="230" cy="40" r="3" fill="var(--th-on-12)" />
-                      <circle cx="245" cy="130" r="5" fill="var(--th-on-06)" />
-                      
-                      {/* Sparkle/star accents */}
-                      <path d="M25 100l2-4 2 4-4-2 4 0-4 2z" fill="var(--th-on-16)" />
-                      <path d="M220 150l1.5-3 1.5 3-3-1.5 3 0-3 1.5z" fill="var(--th-on-12)" />
-                      
-                      {/* Connecting line */}
-                      <path d="M185 95 Q 192 92 195 90" stroke="var(--th-on-12)" strokeWidth="1.5" strokeDasharray="3 3" fill="none" />
-                    </svg>
+                <div className="px-6 py-16 text-center">
+                  <div className="w-14 h-14 rounded-2xl bg-muted/60 border border-border/50 flex items-center justify-center mx-auto mb-5">
+                    <FolderPlus className="size-6 text-muted-foreground/70" />
                   </div>
-                  
-                  <h3 className="text-lg font-medium text-foreground/80 mb-2">
-                    Start your first project
+                  <h3 className="text-base font-medium text-foreground/90 mb-1.5">
+                    No projects yet
                   </h3>
-                  <p className="text-sm text-muted-foreground max-w-sm mx-auto mb-8 leading-relaxed">
-                    Import a Git repository, use a template, or deploy from CLI. 
-                    Your projects will appear here.
+                  <p className="text-sm text-muted-foreground max-w-xs mx-auto mb-6 leading-relaxed">
+                    Create your first project to get started.
                   </p>
-                  
-                  <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <div className="flex flex-col items-center gap-3">
                     <Link
                       href="/library"
-                      className="inline-flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5"
+                      className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
                     >
                       <Plus className="size-4" />
-                      Create Project
+                      Create project
                     </Link>
                     <Link
                       href="/library"
-                      className="inline-flex items-center gap-2 px-6 py-3 bg-muted/50 text-foreground text-sm font-medium rounded-xl hover:bg-muted transition-colors"
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
                     >
-                      <GitBranch className="size-4" />
-                      Browse Templates
+                      <Github className="size-3.5" />
+                      Import from GitHub
                     </Link>
                   </div>
-                  
-                  <p className="text-xs text-muted-foreground/60 mt-6">
-                    Or press <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-mono">⌘ K</kbd> to open command palette
-                  </p>
                 </div>
               ) : (
                 <div className="divide-y divide-border/50">

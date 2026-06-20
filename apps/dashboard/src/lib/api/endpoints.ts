@@ -168,6 +168,13 @@ export const endpoints = {
     servers: "system/servers",
     server: (id: string) => `system/servers/${id}`,
     serverRateLimit: (id: string) => `system/servers/${id}/rate-limit`,
+    migration: {
+      preflight: "system/migration/preflight",
+      start: "system/migration/start",
+      startCloud: "system/migration/start-cloud",
+      startTunnel: "system/migration/start-tunnel",
+      switchBack: "system/migration/switch-back",
+    },
   },
 
   /* ---------------------------------------------------------------- */
@@ -216,8 +223,6 @@ export const endpoints = {
       componentsRestartAll: (serverId: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/components/restart-all`,
     },
-    branding: (serverId: string) =>
-      `mail/branding/${encodeURIComponent(serverId)}`,
     webmail: {
       targets: "mail/webmail/targets",
       deployProject: "mail/webmail/deploy-project",

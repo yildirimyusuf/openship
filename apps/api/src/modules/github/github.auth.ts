@@ -16,8 +16,9 @@
  */
 
 import crypto from "crypto";
-import { repos } from "@repo/db";
+import { repos, db, schema, eq, and } from "@repo/db";
 import { APIError } from "better-auth/api";
+import { safeErrorMessage } from "@repo/core";
 import { env } from "../../config/env";
 import { auth } from "../../lib/auth";
 import { cacheStore } from "../../lib/cache-store";
@@ -572,6 +573,50 @@ export async function getUserStatus(userId: string) {
   }
 }
 
+/**
+ * Wrap `getUserStatus` with a diagnostic DB-row count on the disconnected
+ * branch. Extracted from cloud-saas.controller's githubUserStatus handler
+ * so the diagnostic lookup stays in sync with the auth resolution above
+ * for every caller — the controller used to ad-hoc the same query.
+ *
+ * Distinguishes "wrong-user/stale-cloud-session" (no row in DB) from
+ * "row exists but token refresh failed" (token fetch null).
+ */
+export async function getUserStatusWithDiagnostics(
+  userId: string,
+): Promise<
+  | { connected: false; githubAccountRowsForUser: number }
+  | { connected: true; login: string; avatar_url: string; id: string }
+> {
+  const status = await getUserStatus(userId);
+  if (!status.connected) {
+    let githubRowCount = -1;
+    try {
+      const rows = await db
+        .select({ id: schema.account.id })
+        .from(schema.account)
+        .where(
+          and(
+            eq(schema.account.userId, userId),
+            eq(schema.account.providerId, "github"),
+          ),
+        );
+      githubRowCount = rows.length;
+    } catch (err) {
+      console.log(
+        `[cloud-saas:githubUserStatus] account lookup failed: ${safeErrorMessage(err)}`,
+      );
+    }
+    return { connected: false, githubAccountRowsForUser: githubRowCount };
+  }
+  return {
+    connected: true,
+    login: status.login,
+    avatar_url: status.avatar_url,
+    id: String(status.id),
+  };
+}
+
 // ─── Canonical connection state (single source of truth) ────────────────────
 
 /**
@@ -767,7 +812,16 @@ export async function getUserInstallations(
     }
 
     return installations;
-  } catch {
+  } catch (err) {
+    // Surface the underlying error so token-type mismatches (OAuth App vs
+    // GitHub App user-to-server token) and other 403s don't disappear
+    // behind a silent fallback to stale DB cache. The fallback itself is
+    // intentional — a stale list is better than an empty UI — but the
+    // warn makes the failure mode visible the next time it fires.
+    console.warn(
+      "[GitHub] /user/installations failed, falling back to stored installations:",
+      (err as Error).message,
+    );
     return getStoredInstallations(userId);
   }
 }

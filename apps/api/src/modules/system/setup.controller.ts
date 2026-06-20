@@ -11,7 +11,10 @@
  */
 
 import type { Context } from "hono";
-import { repos } from "@repo/db";
+import { setSignedCookie } from "hono/cookie";
+import { db, repos, schema, eq, and } from "@repo/db";
+import { generateId } from "@repo/core";
+import { hashPassword } from "better-auth/crypto";
 import { invalidateOpenRestyPaths } from "@/lib/openresty-paths";
 import { env } from "../../config";
 import { audit, auditContextFrom } from "../../lib/audit";
@@ -19,6 +22,10 @@ import { clearAuthModeCache } from "../../lib/auth-mode";
 import { normalizeRollbackWindow } from "../../lib/release-retention";
 import { sshManager } from "../../lib/ssh-manager";
 import { encryptSecretField } from "@/lib/credential-encryption";
+import { ensureLocalUser, invalidateLocalUserCache } from "../../lib/local-user";
+import { COOKIE_PREFIX } from "../../lib/auth";
+import { createLocalSession } from "../../lib/cloud-auth-proxy";
+import { invalidatePlatformTransportCache } from "../../lib/mail";
 
 const VALID_AUTH_MODES = ["none", "local", "cloud"] as const;
 type AuthMode = (typeof VALID_AUTH_MODES)[number];
@@ -178,6 +185,10 @@ export async function getSetup(c: Context) {
     tunnelProvider: settings?.tunnelProvider ?? null,
     defaultBuildMode: settings?.defaultBuildMode ?? "auto",
     defaultRollbackWindow: normalizeRollbackWindow(settings?.defaultRollbackWindow),
+    invitationMailSource: settings?.invitationMailSource ?? "platform",
+    teamMode: settings?.teamMode ?? "single_user",
+    migrationTargetUrl: settings?.migrationTargetUrl ?? null,
+    migratedAt: settings?.migratedAt?.toISOString() ?? null,
   });
 }
 
@@ -211,6 +222,16 @@ export async function updateSettings(c: Context) {
   if (body.defaultBuildMode !== undefined) patch.defaultBuildMode = body.defaultBuildMode || "auto";
   if (body.defaultRollbackWindow !== undefined) {
     patch.defaultRollbackWindow = normalizeRollbackWindow(body.defaultRollbackWindow);
+  }
+  if (body.invitationMailSource !== undefined) {
+    const raw = body.invitationMailSource;
+    if (raw !== "platform" && raw !== "cloud") {
+      return c.json(
+        { error: "invitationMailSource must be 'platform' or 'cloud'" },
+        400,
+      );
+    }
+    patch.invitationMailSource = raw;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -281,6 +302,182 @@ export async function onboardingStatus(c: Context) {
 
   const servers = await repos.server.list();
   return c.json({ configured: servers.length > 0 });
+}
+
+// ── Auth upgrade (zero-auth → local-auth) ────────────────────────────────────
+
+/**
+ * POST /system/upgrade-to-auth — promote the synthetic zero-auth user
+ * to a real email/password account.
+ *
+ * Only callable while `authMode === "none"`. Steps:
+ *
+ *   1. Locate the existing local user via ensureLocalUser (preserves
+ *      userId so every existing FK — projects, deployments, member,
+ *      audit — keeps resolving).
+ *   2. UPDATE user.{name,email,emailVerified,autoProvisioned=false}.
+ *   3. Insert a credential-provider account row with the hashed
+ *      password (Better Auth's own hasher).
+ *   4. If `useOwnMailServer === true` and a provisioned mail server
+ *      exists, ensureOpenshipPlatformMailbox(serverId) so the platform
+ *      transport is ready for the new login emails.
+ *   5. Flip instanceSettings.authMode "none" → "local" (audit row).
+ *   6. Mint a Better Auth session and stamp the response cookie so the
+ *      browser stays signed in across the redirect.
+ *
+ * Reversible up to step 5: any failure before the authMode flip leaves
+ * the instance in zero-auth mode and the operator can retry.
+ */
+export async function upgradeToAuth(c: Context) {
+  if (!assertNotCloud(c)) return c.res;
+
+  const settings = await repos.instanceSettings.get();
+  const currentMode = settings?.authMode ?? "none";
+  if (currentMode !== "none") {
+    return c.json(
+      {
+        error:
+          "Auth upgrade is only available from zero-auth mode. Current mode: " +
+          currentMode,
+      },
+      400,
+    );
+  }
+
+  const body = (await c.req.json()) as {
+    name?: unknown;
+    email?: unknown;
+    password?: unknown;
+    useOwnMailServer?: unknown;
+  };
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  const useOwnMailServer = body.useOwnMailServer === true;
+
+  if (!name || name.length < 1 || name.length > 100) {
+    return c.json({ error: "name is required (1-100 chars)" }, 400);
+  }
+  if (!email || !email.includes("@") || email.length > 254) {
+    return c.json({ error: "email must be a valid address" }, 400);
+  }
+  if (password.length < 8 || password.length > 128) {
+    return c.json({ error: "password must be 8-128 characters" }, 400);
+  }
+
+  // Reject if the email collides with an OTHER user (we DO allow it to
+  // collide with the local synthetic user — that's the row we're
+  // rewriting).
+  const existingByEmail = await repos.user.findByEmail(email);
+  const localUser = await ensureLocalUser();
+  if (existingByEmail && existingByEmail.id !== localUser.id) {
+    return c.json({ error: "An account with this email already exists" }, 409);
+  }
+
+  const hashed = await hashPassword(password);
+
+  // 1+2+3. Update user + insert credential account in one transaction.
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.user)
+      .set({
+        name,
+        email,
+        emailVerified: true,
+        autoProvisioned: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.user.id, localUser.id));
+
+    // Better Auth's credential provider expects providerId="credential",
+    // accountId=userId, and the bcrypt-style hash in `password`. There
+    // should be no prior credential row for the zero-auth user; guard
+    // by deleting any existing credential row first to keep the call
+    // idempotent on retry.
+    await tx
+      .delete(schema.account)
+      .where(
+        and(
+          eq(schema.account.userId, localUser.id),
+          eq(schema.account.providerId, "credential"),
+        ),
+      );
+
+    await tx.insert(schema.account).values({
+      id: generateId("acc"),
+      accountId: localUser.id,
+      providerId: "credential",
+      userId: localUser.id,
+      password: hashed,
+    });
+
+    // 5. Flip authMode "none" → "local".
+    await tx
+      .insert(schema.instanceSettings)
+      .values({ id: "default", authMode: "local" })
+      .onConflictDoUpdate({
+        target: schema.instanceSettings.id,
+        set: { authMode: "local", updatedAt: new Date() },
+      });
+  });
+
+  invalidateLocalUserCache();
+  clearAuthModeCache();
+
+  // 4. Best-effort: warm the platform mailbox if requested. We don't
+  //    fail the upgrade if this errors — sendMail() will fall back to
+  //    env-based transport on subsequent emails.
+  if (useOwnMailServer) {
+    try {
+      const mailServers = await repos.mailServer.list();
+      const installed = mailServers.find((m) => m.installedAt != null);
+      if (installed) {
+        const { ensureOpenshipPlatformMailbox } = await import(
+          "../mail/admin/platform-mailbox.service"
+        );
+        await ensureOpenshipPlatformMailbox(installed.serverId);
+        invalidatePlatformTransportCache();
+      }
+    } catch (err) {
+      console.warn("[upgradeToAuth] platform mailbox warm-up failed:", err);
+    }
+  }
+
+  // Audit the mode flip.
+  audit.recordAsync(
+    auditContextFrom(c, "instance", localUser.id),
+    {
+      eventType: "auth-mode-changed",
+      resourceType: "instance-settings",
+      resourceId: "instance",
+      before: { authMode: "none" },
+      after: { authMode: "local", upgradedUserId: localUser.id, email },
+    },
+  );
+
+  // 6. Mint a fresh session so the browser stays signed in.
+  const ipAddress = c.req.header("x-forwarded-for") ?? "127.0.0.1";
+  const userAgent = c.req.header("user-agent") ?? "upgrade";
+  const session = await createLocalSession(localUser.id, ipAddress, userAgent);
+  await setSignedCookie(
+    c,
+    `${COOKIE_PREFIX}.session_token`,
+    session.token,
+    env.BETTER_AUTH_SECRET,
+    {
+      httpOnly: true,
+      secure: false,
+      sameSite: "Lax",
+      path: "/",
+      expires: session.expiresAt,
+    },
+  );
+
+  return c.json({
+    ok: true,
+    authMode: "local",
+    user: { id: localUser.id, name, email },
+  });
 }
 
 /**

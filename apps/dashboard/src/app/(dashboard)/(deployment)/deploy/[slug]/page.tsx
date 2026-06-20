@@ -21,6 +21,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import SkeletonLoader from "./components/SkeletonLoader";
 import ErrorState from "@/components/shared/ErrorState";
 import { PageContainer } from "@/components/ui/PageContainer";
+import { useToast } from "@/components/toast";
 
 interface DeployError {
     type: 'invalid_url' | 'repo_not_found' | 'initialization_failed';
@@ -80,6 +81,7 @@ const DeployRepository: React.FC = () => {
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<DeployError | null>(null);
     const hasInitialized = useRef<boolean>(false);
+    const { toast } = useToast();
 
     // Desktop-only: resolve available deploy targets (server / cloud)
     const targets = useDesktopTargets();
@@ -178,21 +180,31 @@ const DeployRepository: React.FC = () => {
                     return;
                 }
 
-                // Handle specific error cases
+                // Handle specific error cases. We surface BOTH the full-page
+                // ErrorState (so the user can read the detail + retry) AND a
+                // toast (so the error doesn't go unnoticed if they navigated
+                // away). Network errors already trigger the global toast via
+                // NetworkErrorHandler — only fire here for api_error so we
+                // don't double-toast network failures.
                 if (result.error) {
                     setError({
                         type: result.errorType === 'api_error' ? 'repo_not_found' : 'initialization_failed',
                         message: decoded.kind === 'local' ? 'Failed to Load Project' : 'Failed to Load Repository',
                         details: result.error
                     });
+                    if (result.errorType === 'api_error') {
+                        toast('error', result.error);
+                    }
                 } else {
+                    const fallbackDetail = decoded.kind === 'local'
+                        ? 'We couldn\'t scan this folder. Make sure the path is correct and accessible.'
+                        : 'We couldn\'t load this repository. It might be private, doesn\'t exist, or you don\'t have access to it.';
                     setError({
                         type: 'initialization_failed',
                         message: decoded.kind === 'local' ? 'Failed to Load Project' : 'Failed to Load Repository',
-                        details: decoded.kind === 'local'
-                            ? 'We couldn\'t scan this folder. Make sure the path is correct and accessible.'
-                            : 'We couldn\'t load this repository. It might be private, doesn\'t exist, or you don\'t have access to it.'
+                        details: fallbackDetail
                     });
+                    toast('error', fallbackDetail);
                 }
             }
             
@@ -200,7 +212,7 @@ const DeployRepository: React.FC = () => {
         };
 
         initialize();
-    }, [slug, initializeFromRepo, initializeFromLocal, force, projectId, branch]);
+    }, [slug, initializeFromRepo, initializeFromLocal, force, projectId, branch, toast]);
 
     if (loading) {
         return <SkeletonLoader source={decodedSource} />;

@@ -54,13 +54,13 @@ export async function betterAuthShield(c: Context, next: Next) {
 
   if (!session?.user?.id) return next();
 
-  const activeOrganizationId =
-    (session.session as { activeOrganizationId?: string | null } | undefined)
-      ?.activeOrganizationId ?? null;
-
-  // No active org → no org-scoped membership to check. Let Better Auth
-  // respond however it normally would (typically empty list / 400).
-  if (!activeOrganizationId) return next();
+  // activeOrganizationId is NOT NULL at the schema level — guaranteed
+  // by the session.create.before hook in lib/auth.ts and by
+  // createLocalSession's explicit set, with a migration backfilling
+  // any legacy nulls. The cast is safe because of that invariant.
+  const activeOrganizationId = (
+    session.session as { activeOrganizationId: string }
+  ).activeOrganizationId;
 
   let role: string;
   try {

@@ -13,7 +13,7 @@
  * All accessible via the authClient.organization.* methods.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Loader2,
   Mail,
@@ -26,11 +26,15 @@ import {
   Users as UsersIcon,
   Shield,
   Lock,
+  Send,
+  Cloud,
 } from "lucide-react";
 import { authClient, useSession } from "@/lib/auth-client";
 import { useToast } from "@/context/ToastContext";
-import { api, getApiErrorMessage } from "@/lib/api";
+import { api, ApiError, getApiErrorMessage, isNetworkError } from "@/lib/api";
 import { ResourcePicker, type PickerGrant } from "@/components/permissions/ResourcePicker";
+import { usePlatform } from "@/context/PlatformContext";
+import { TeamWorkspaceCard } from "./TeamWorkspaceCard";
 
 type MemberRole = "owner" | "admin" | "member" | "restricted";
 
@@ -118,6 +122,19 @@ export function TeamTab() {
   // Invite-modal extras: pending grants picked when role = restricted.
   const [invitePickerGrants, setInvitePickerGrants] = useState<PickerGrant[]>([]);
 
+  // Per-instance invitation mail source. Loaded from /api/system/settings.
+  // The toggle in the invite modal persists this choice via PATCH —
+  // each invite picks up the latest value through the backend's
+  // sendInvitationEmail callback (which re-reads on every send).
+  type InvitationMailSource = "platform" | "cloud";
+  const [invitationMailSource, setInvitationMailSource] =
+    useState<InvitationMailSource>("platform");
+  const [savingMailSource, setSavingMailSource] = useState(false);
+  const [teamMode, setTeamMode] = useState<
+    "single_user" | "self_hosted_remote" | "cloud_hosted" | "tunneled"
+  >("single_user");
+  const { selfHosted } = usePlatform();
+
   // Org-meta: drives personal-vs-team UX. Personal workspaces (auto-
   // created on signup) hide the invite UI; clicking "Create team org"
   // spawns a brand-new is_team=true org with the same owner.
@@ -126,10 +143,19 @@ export function TeamTab() {
   const [newTeamName, setNewTeamName] = useState("");
   const [creatingTeam, setCreatingTeam] = useState(false);
 
+  // In-flight guard. React Strict Mode mounts every component twice in
+  // dev to surface non-idempotent effects — without this ref the refresh
+  // effect fires two parallel fetches on every page load. The ref flips
+  // true at the start of a refresh and resets in `finally`, so retries
+  // after errors still work, but the StrictMode remount no-ops.
+  const refreshingRef = useRef(false);
+
   const refresh = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
     setLoading(true);
     try {
-      const [mRes, iRes, metaRes] = await Promise.all([
+      const [mRes, iRes, metaRes, settingsRes] = await Promise.all([
         orgClient.listMembers(),
         orgClient.listInvitations(),
         // org-meta drives the personal-vs-team UX. The backend ensures
@@ -137,16 +163,49 @@ export function TeamTab() {
         api.get<{ data: { isTeam: boolean; memberCount: number } }>(
           "permissions/org-meta",
         ).catch(() => ({ data: { isTeam: false, memberCount: 0 } })),
+        api
+          .get<{
+            invitationMailSource?: InvitationMailSource;
+            teamMode?: "single_user" | "self_hosted_remote" | "cloud_hosted" | "tunneled";
+          }>("system/settings")
+          .catch(() => ({ invitationMailSource: "platform" as InvitationMailSource })),
       ]);
       setMembers(mRes.data?.members ?? []);
       setInvitations(iRes.data ?? []);
       setOrgMeta(metaRes.data);
+      const src = settingsRes?.invitationMailSource;
+      if (src === "platform" || src === "cloud") {
+        setInvitationMailSource(src);
+      }
+      const tm = (settingsRes as { teamMode?: typeof teamMode })?.teamMode;
+      if (tm) setTeamMode(tm);
     } catch (err) {
+      // Network/abort errors are handled by the global NetworkErrorHandler;
+      // only surface real API errors here so we don't double-toast.
       console.error("Failed to load members", err);
+      if (err instanceof ApiError || !isNetworkError(err)) {
+        showToast(getApiErrorMessage(err, "Failed to load team"), "error", "Team");
+      }
     } finally {
       setLoading(false);
+      refreshingRef.current = false;
     }
-  }, []);
+  }, [showToast]);
+
+  const handleMailSourceChange = async (next: InvitationMailSource) => {
+    if (next === invitationMailSource) return;
+    const prev = invitationMailSource;
+    setInvitationMailSource(next);
+    setSavingMailSource(true);
+    try {
+      await api.patch("system/settings", { invitationMailSource: next });
+    } catch (err) {
+      setInvitationMailSource(prev);
+      showToast(getApiErrorMessage(err, "Failed to update mail source"), "error", "Settings");
+    } finally {
+      setSavingMailSource(false);
+    }
+  };
 
   const handleCreateTeam = async () => {
     const name = newTeamName.trim();
@@ -353,8 +412,15 @@ export function TeamTab() {
   const isTeamOrg = orgKind === "team";
   const isPersonalOrg = orgKind === "personal";
 
+  // Team-workspace migration card: surfaced ONLY to the owner on
+  // single_user self-hosted instances. After migration the dashboard
+  // renders the MigratedLauncher in place of this whole page anyway.
+  const showWorkspaceMigration = selfHosted && teamMode === "single_user";
+
   return (
     <div className="space-y-6">
+      {showWorkspaceMigration && <TeamWorkspaceCard canMigrate={!!isOwner} />}
+
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2
@@ -765,6 +831,45 @@ export function TeamTab() {
                           : undefined
                       }
                     />
+                  </div>
+                </div>
+
+                {/* Mail source toggle. Persists to instance_settings
+                    so every subsequent invite uses the chosen source
+                    until flipped again. */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-foreground block">
+                    Send via
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleMailSourceChange("platform")}
+                      disabled={inviting || savingMailSource}
+                      aria-pressed={invitationMailSource === "platform"}
+                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-all disabled:opacity-50 ${
+                        invitationMailSource === "platform"
+                          ? "border-primary/40 bg-primary/[0.06] text-foreground"
+                          : "border-border/50 bg-muted/[0.05] text-muted-foreground hover:bg-muted/15"
+                      }`}
+                    >
+                      <Send className="size-3.5" />
+                      Your mail server
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMailSourceChange("cloud")}
+                      disabled={inviting || savingMailSource}
+                      aria-pressed={invitationMailSource === "cloud"}
+                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-all disabled:opacity-50 ${
+                        invitationMailSource === "cloud"
+                          ? "border-primary/40 bg-primary/[0.06] text-foreground"
+                          : "border-border/50 bg-muted/[0.05] text-muted-foreground hover:bg-muted/15"
+                      }`}
+                    >
+                      <Cloud className="size-3.5" />
+                      Openship Cloud
+                    </button>
                   </div>
                 </div>
 

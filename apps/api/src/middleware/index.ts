@@ -5,3 +5,4 @@ export { rateLimiter } from "./rate-limiter";
 export { betterAuthShield } from "./better-auth-shield";
 export { clientIpMiddleware } from "./client-ip";
 export { requireRole } from "./active-organization";
+export { migrationGuard } from "./migration-guard";

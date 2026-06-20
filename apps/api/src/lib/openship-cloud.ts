@@ -98,6 +98,20 @@ export interface NamespaceTokenResult {
   expiresAt: string;
 }
 
+export interface NamespaceClientResult {
+  /** Oblien SDK instance bound to a namespace-scoped token for this org. */
+  client: Oblien;
+  /**
+   * Namespace slug for this org. Pass this on every Oblien create-shape
+   * call that accepts a `namespace` field (pages.create, edgeProxy.create,
+   * edgeTunnel.create, workspace.create, tokens.create) so Oblien can
+   * cross-check that the resource belongs to the token's namespace.
+   * Non-create methods identify the resource by id/slug — namespace
+   * isn't an input param, the token scope is the only gate.
+   */
+  namespace: string;
+}
+
 /**
  * Issue a namespace-scoped Oblien token for an org. The token gives
  * full access to the org's namespace — create workspaces, manage
@@ -127,4 +141,30 @@ export async function issueNamespaceToken(organizationId: string): Promise<Names
     const message = safeErrorMessage(err);
     throw new Error(`Failed to issue Oblien namespace token for ${namespace}: ${message}`);
   }
+}
+
+/**
+ * Canonical "I need to call Oblien for this org" entry point.
+ *
+ * Returns BOTH the namespace-scoped client AND the namespace slug, so
+ * callers can pass `namespace` explicitly on Oblien's create-shape
+ * methods. Oblien validates that the resource being created lives in
+ * the namespace the token authenticates — without the explicit param
+ * the create methods accept any namespace the token is allowed in
+ * (today that's exactly one — but defense in depth).
+ *
+ * Non-create methods (disable / enable / delete / list / update by id
+ * or slug, analytics by domain) don't accept namespace as input — the
+ * token scope is the only gate there. Oblien rejects cross-namespace
+ * mutations with 403/404 server-side post-fix.
+ *
+ * Replaces the duplicated ad-hoc `getNamespaceClient` helpers that
+ * lived inside each cloud-* service file (those discarded the
+ * namespace slug, defeating the explicit pass-through).
+ */
+export async function getNamespaceClient(
+  organizationId: string,
+): Promise<NamespaceClientResult> {
+  const { token, namespace } = await issueNamespaceToken(organizationId);
+  return { client: new Oblien({ token }), namespace };
 }

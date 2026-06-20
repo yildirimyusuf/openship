@@ -11,6 +11,7 @@
  */
 
 import { repos } from "@repo/db";
+import type { DatabaseDump, SubgraphScope } from "@repo/db";
 import { safeErrorMessage } from "@repo/core";
 import type { CloudPreflightData } from "./cloud-preflight";
 import { cloudRuntimeTarget, cloudRuntimeTargetId } from "../config/env";
@@ -193,6 +194,9 @@ export interface CloudClient {
       slug: string;
       domain?: string;
     }): Promise<{ page: { slug: string; url?: string | null } }>;
+    disable(slug: string): Promise<void>;
+    enable(slug: string): Promise<void>;
+    delete(slug: string): Promise<void>;
   };
   edgeProxy: {
     sync(input: {
@@ -212,6 +216,50 @@ export interface CloudClient {
   account(): Promise<CloudAccount | null>;
   disconnect(): Promise<void>;
   token(): Promise<{ token: string; namespace: string } | null>;
+  /**
+   * Relay an organization invitation email through the SaaS's mail
+   * infrastructure. Used by self-hosted instances that have opted into
+   * `invitationMailSource = "cloud"`. Org-scoped — the org owner's cloud
+   * session token authenticates the call on the SaaS side.
+   */
+  sendInvitation(input: {
+    to: string;
+    subject: string;
+    html: string;
+    text: string;
+  }): Promise<{ ok: true; messageId: string } | { ok: false; error: string }>;
+  /**
+   * Forward primitive — upload a SubgraphScope dump to the SaaS.
+   *
+   * Used by team-mode migration Path B (org-scope) and project
+   * transfer (project-scope). The SaaS derives the target org from
+   * the caller's session and remaps every organizationId column onto
+   * it. Returns the public URL teammates use to sign in.
+   *
+   * Org-scoped on the caller side: the operator's cloud session
+   * authenticates as the org owner. `allowNonEmptyTarget=true`
+   * acknowledges that the target org may already have rows and
+   * proceeds anyway — the operator handles any PK collisions. It
+   * does NOT wipe existing rows before insert.
+   */
+  ingestSubgraph(input: {
+    dump: DatabaseDump;
+    allowNonEmptyTarget?: boolean;
+  }): Promise<
+    | { ok: true; organizationId: string; publicUrl: string; imported: Record<string, number> }
+    | { ok: false; error: string; code?: string; projectCount?: number }
+  >;
+  /**
+   * Generalised reverse primitive — fetch a SubgraphScope dump from the
+   * SaaS. Used by team-mode switch-back (org-scope) and project transfer
+   * back (project-scope).
+   */
+  exportSubgraph(input: {
+    scope: SubgraphScope;
+  }): Promise<
+    | { ok: true; dump: DatabaseDump }
+    | { ok: false; error: string; code?: string }
+  >;
 }
 
 /**
@@ -242,6 +290,53 @@ export function cloudClient(scope: CloudClientScope): CloudClient {
       .catch(() => undefined);
     return linked?.userId ?? null;
   };
+
+  /**
+   * Shared POST-and-decode pattern for the cloud client's `{ok}`-shaped
+   * methods. Handles every failure mode the caller cares about:
+   *   - No SaaS session for this scope        → { ok: false, error: "Not connected..." }
+   *   - HTTP error (4xx/5xx)                  → { ok: false, error, code?, projectCount? }
+   *   - Non-JSON success body                 → { ok: false, error: "non-JSON response" }
+   *   - Success                               → { ok: true, ...body }
+   *
+   * Error responses pass through `code` and `projectCount` from the
+   * SaaS body for the methods that declare them; methods that don't
+   * just receive `undefined` and TypeScript is happy.
+   */
+  async function postCloud<TOk extends object>(opts: {
+    path: string;
+    body?: unknown;
+    errorLabel: string;
+  }): Promise<
+    | ({ ok: true } & TOk)
+    | { ok: false; error: string; code?: string; projectCount?: number }
+  > {
+    const res = await fetchScoped(opts.path, {
+      method: "POST",
+      ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+    });
+    if (!res) {
+      return { ok: false, error: "Not connected to Openship Cloud" };
+    }
+    if (!res.ok) {
+      const err = await readCloudJson<{
+        error?: string;
+        code?: string;
+        projectCount?: number;
+      }>(res);
+      return {
+        ok: false,
+        error: err?.error ?? `${opts.errorLabel} failed: HTTP ${res.status}`,
+        code: err?.code,
+        projectCount: err?.projectCount,
+      };
+    }
+    const body = await readCloudJson<TOk>(res);
+    if (!body) {
+      return { ok: false, error: "Cloud returned a non-JSON response" };
+    }
+    return { ok: true, ...body };
+  }
 
   return {
     github: {
@@ -312,6 +407,57 @@ export function cloudClient(scope: CloudClientScope): CloudClient {
           );
         }
         return body;
+      },
+      async disable(slug) {
+        const res = await fetchScoped("/api/cloud/pages/disable", {
+          method: "POST",
+          body: JSON.stringify({ slug }),
+        });
+        if (!res) {
+          throw new Error(
+            "Not connected to Openship Cloud — connect your account in Settings.",
+          );
+        }
+        if (!res.ok) {
+          let detail = `Cloud page disable failed: HTTP ${res.status}`;
+          const body = await readCloudJson<{ error?: string }>(res);
+          if (body?.error) detail = body.error;
+          throw new Error(detail);
+        }
+      },
+      async enable(slug) {
+        const res = await fetchScoped("/api/cloud/pages/enable", {
+          method: "POST",
+          body: JSON.stringify({ slug }),
+        });
+        if (!res) {
+          throw new Error(
+            "Not connected to Openship Cloud — connect your account in Settings.",
+          );
+        }
+        if (!res.ok) {
+          let detail = `Cloud page enable failed: HTTP ${res.status}`;
+          const body = await readCloudJson<{ error?: string }>(res);
+          if (body?.error) detail = body.error;
+          throw new Error(detail);
+        }
+      },
+      async delete(slug) {
+        const res = await fetchScoped("/api/cloud/pages/delete", {
+          method: "POST",
+          body: JSON.stringify({ slug }),
+        });
+        if (!res) {
+          throw new Error(
+            "Not connected to Openship Cloud — connect your account in Settings.",
+          );
+        }
+        if (!res.ok) {
+          let detail = `Cloud page delete failed: HTTP ${res.status}`;
+          const body = await readCloudJson<{ error?: string }>(res);
+          if (body?.error) detail = body.error;
+          throw new Error(detail);
+        }
       },
     },
 
@@ -402,6 +548,34 @@ export function cloudClient(scope: CloudClientScope): CloudClient {
         cacheStore<CloudAccount>("cloud-status"),
       ]);
       await Promise.all([tokens.delete(userId), statuses.delete(userId)]);
+    },
+
+    async sendInvitation(input) {
+      return postCloud<{ messageId: string }>({
+        path: "/api/cloud/send-invitation",
+        body: input,
+        errorLabel: "Cloud invitation relay",
+      });
+    },
+
+    async ingestSubgraph(input) {
+      return postCloud<{
+        organizationId: string;
+        publicUrl: string;
+        imported: Record<string, number>;
+      }>({
+        path: "/api/cloud/ingest-subgraph",
+        body: input,
+        errorLabel: "Cloud subgraph ingest",
+      });
+    },
+
+    async exportSubgraph(input) {
+      return postCloud<{ dump: DatabaseDump }>({
+        path: "/api/cloud/export-subgraph",
+        body: input,
+        errorLabel: "Cloud subgraph export",
+      });
     },
 
     async token() {

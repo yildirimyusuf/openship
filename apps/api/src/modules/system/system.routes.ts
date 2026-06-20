@@ -18,6 +18,7 @@ import * as setup from "./setup.controller";
 import * as serverCheck from "./server-check.controller";
 import * as serversCtrl from "./servers.controller";
 import * as rateLimit from "./rate-limit.controller";
+import * as migration from "./migration/migration.controller";
 
 const r = secureRouter(new Hono(), {
   module: "system",
@@ -38,6 +39,17 @@ r.public("get", "/setup", { reason: "Electron desktop client setup read - protec
 r.get("/settings", { tag: "settings:read" }, setup.getSetup);
 r.patch("/settings", { tag: "settings:write" }, setup.updateSettings);
 r.delete("/settings", { tag: "settings:admin" }, setup.deleteSettings);
+
+/* ── Zero-auth → local-auth upgrade (no session yet) ────────────── */
+r.public(
+  "post",
+  "/upgrade-to-auth",
+  {
+    reason:
+      "Zero-auth upgrade flow — no session cookie exists for the synthetic local user. Handler enforces authMode === 'none' before mutating.",
+  },
+  setup.upgradeToAuth,
+);
 
 /* ── Servers CRUD ───────────────────────────────────────────────── */
 r.get("/servers", { tag: "server:list" }, serversCtrl.listServers);
@@ -64,6 +76,17 @@ r.get("/monitor/stream", { tag: "server:read" }, serverCheck.monitorStream);
 
 /* ── Filesystem browse ──────────────────────────────────────────── */
 r.get("/browse", { tag: "settings:read" }, fs.browse);
+
+/* ── Team-mode migration ─────────────────────────────────────────
+ * Path A (single_user → self_hosted_remote): preflight + start
+ * Path B (single_user → cloud_hosted):       start-cloud
+ * Path C (single_user → tunneled):           start-tunnel
+ */
+r.post("/migration/preflight", { tag: "settings:admin" }, migration.preflight);
+r.post("/migration/start", { tag: "settings:admin" }, migration.start);
+r.post("/migration/start-cloud", { tag: "settings:admin" }, migration.startCloud);
+r.post("/migration/start-tunnel", { tag: "settings:admin" }, migration.startTunnel);
+r.post("/migration/switch-back", { tag: "settings:admin" }, migration.switchBack);
 
 export const systemRoutes = r.hono;
 

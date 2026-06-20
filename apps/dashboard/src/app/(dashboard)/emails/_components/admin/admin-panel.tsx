@@ -27,7 +27,7 @@ import {
   UserRound,
   FileText,
   HeartPulse,
-  Palette,
+  Send,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -38,7 +38,7 @@ import { DomainsTab } from "./domains-tab";
 import { MailboxesTab } from "./mailboxes-tab";
 import { DnsTab } from "./dns-tab";
 import { HealthTab } from "./health-tab";
-import { BrandingTab } from "./branding-tab";
+import { TestTab } from "./test-tab";
 import { AdvancedTab } from "./advanced-tab";
 import { WelcomeModal } from "./welcome-modal";
 import { ReputationBanner } from "./reputation-banner";
@@ -57,7 +57,7 @@ type TabKey =
   | "mailboxes"
   | "dns"
   | "health"
-  | "branding"
+  | "test"
   | "advanced";
 
 interface TabDef {
@@ -72,7 +72,7 @@ const TABS: TabDef[] = [
   { key: "mailboxes", label: "Mailboxes", icon: UserRound },
   { key: "dns", label: "DNS", icon: FileText },
   { key: "health", label: "Health", icon: HeartPulse },
-  { key: "branding", label: "Branding", icon: Palette },
+  { key: "test", label: "Test", icon: Send },
   { key: "advanced", label: "Advanced", icon: Settings },
 ];
 
@@ -162,7 +162,7 @@ export function MailAdminPanel({ status, serverId, onRefresh }: MailAdminPanelPr
         )}
         {tab === "dns" && <DnsTab status={status} />}
         {tab === "health" && <HealthTab serverId={serverId} />}
-        {tab === "branding" && <BrandingTab serverId={serverId} />}
+        {tab === "test" && <TestTab serverId={serverId} />}
         {tab === "advanced" && (
           <AdvancedTab
             status={status}

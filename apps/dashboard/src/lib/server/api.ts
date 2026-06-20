@@ -93,6 +93,23 @@ type ServerRequestOptions = {
 /*  Core request                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Server-side API base URL.
+ *
+ * When proxy mode is on (NEXT_PUBLIC_API_PROXY=true), the SSR layer
+ * could route via `/api/proxy/*` on its own origin — but that's a
+ * pointless self-fetch hop. Short-circuit to INTERNAL_API_URL when it
+ * exists; the server has direct access. Falls through to the normal
+ * getApiOrigin() (runtime-config table) otherwise.
+ */
+function getServerApiBaseUrl(requestHeaders: Headers): string {
+  if (process.env.NEXT_PUBLIC_API_PROXY === "true") {
+    const internal = process.env.INTERNAL_API_URL;
+    if (internal) return internal.replace(/\/+$/, "");
+  }
+  return getApiOrigin(getRequestOriginFromHeaders(requestHeaders));
+}
+
 async function request<T = unknown>(
   method: string,
   path: string,
@@ -100,7 +117,7 @@ async function request<T = unknown>(
 ): Promise<T> {
   const { body, timeout = DEFAULT_TIMEOUT, params, headers: extraHeaders, cache, revalidate } = opts;
   const requestHeaders = await headers();
-  const baseUrl = getApiOrigin(getRequestOriginFromHeaders(requestHeaders));
+  const baseUrl = getServerApiBaseUrl(requestHeaders);
 
   /* --- Build URL -------------------------------------------------- */
   const url = new URL(path.startsWith("/") ? path : `/${path}`, baseUrl);

@@ -187,14 +187,27 @@ export async function status(c: Context) {
 }
 
 /**
- * GET /api/cloud/connect-callback?code=<one-time-code>
+ * GET /api/cloud/connect-callback?code=<one-time-code>&state=<flow_id>
  *
  * After the user authenticates on Openship Cloud, they're redirected
- * here with a one-time code. We exchange it and store the cloud token.
+ * here with a one-time code. We render a tiny browser page that reads
+ * the PKCE verifier (stashed in localStorage by the dashboard initiator
+ * before the popup opened) and POSTs (code, codeVerifier) to
+ * /api/cloud/connect-finalize, which performs the actual token exchange.
+ *
+ * Doing the exchange browser-side rather than directly here is what
+ * lets us bind the one-time code to a PKCE verifier the SaaS issuer
+ * has never seen — without sending the verifier through the SaaS at any
+ * point. If no verifier is found in localStorage (older flow, popup
+ * disabled, third-party cookies blocking storage) we fall back to the
+ * legacy non-PKCE exchange so the connect still completes.
  */
 export async function connectCallback(c: Context) {
-  const userId = getUserId(c);
+  // requireRole("owner") on the route already enforces auth; we don't
+  // need to resolve the user here — the actual exchange happens in
+  // connectFinalize, where it's bound to the calling user.
   const code = c.req.query("code");
+  const state = c.req.query("state") ?? "";
   if (!code) {
     console.error("[cloud-connect-callback] missing code query param");
     return c.html(
@@ -204,45 +217,98 @@ export async function connectCallback(c: Context) {
       ),
     );
   }
+  return c.html(connectFinalizePage(code, state));
+}
 
+/**
+ * POST /api/cloud/connect-finalize  { code, codeVerifier? }
+ *
+ * Browser-side completion of the connect popup flow. The popup script
+ * rendered by /connect-callback reads the verifier from localStorage
+ * and posts here, where we run the SaaS exchange + store the bearer.
+ */
+export async function connectFinalize(c: Context) {
+  const userId = getUserId(c);
+  const body = await c.req
+    .json<{ code?: string; codeVerifier?: string }>()
+    .catch(() => ({} as { code?: string; codeVerifier?: string }));
+  if (!body.code) {
+    return c.json({ error: "code is required" }, 400);
+  }
   try {
     const { exchangeCodeWithCloud, storeCloudSession } = await import(
       "../../lib/cloud-auth-proxy"
     );
-
-    const data = await exchangeCodeWithCloud(code);
+    const data = await exchangeCodeWithCloud(body.code, body.codeVerifier);
     if (!data) {
-      // exchangeCodeWithCloud already logged the specific failure
-      // reason (network / non-2xx / non-JSON / parse error). Operator
-      // sees the line in the API log.
-      return c.html(
-        connectResultPage(
-          "Connection Failed",
-          "Could not verify with Openship Cloud — check the API log for the exact reason (network, cloud unreachable, or invalid response).",
-        ),
+      return c.json(
+        { error: "Could not verify with Openship Cloud" },
+        401,
       );
     }
-
     await storeCloudSession(userId, data.sessionToken);
-
-    return c.html(
-      connectResultPage(
-        "Connected to Openship Cloud",
-        "Your instance is now linked. You can close this window.",
-        true,
-      ),
-    );
+    return c.json({ ok: true });
   } catch (err) {
     console.error(
-      `[cloud-connect-callback] unexpected error: ${safeErrorMessage(err)
-      }`,
+      `[cloud-connect-finalize] unexpected error: ${safeErrorMessage(err)}`,
     );
-    return c.html(
-      connectResultPage(
-        "Connection Failed",
-        `Something went wrong: ${safeErrorMessage(err)
-        }`,
-      ),
-    );
+    return c.json({ error: safeErrorMessage(err) }, 500);
   }
+}
+
+/**
+ * HTML rendered into the popup after the cloud round trip. Reads the
+ * verifier from localStorage (stashed by the dashboard initiator), POSTs
+ * (code, codeVerifier) to /api/cloud/connect-finalize, then closes the
+ * window. All same-origin — the popup ends up on the local API origin,
+ * which is the same origin as the dashboard.
+ */
+function connectFinalizePage(code: string, state: string): string {
+  const safeCode = JSON.stringify(code);
+  const safeState = JSON.stringify(state);
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Openship</title>
+<style>
+body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#fafafa}
+.card{text-align:center;max-width:420px}
+.spinner{width:24px;height:24px;border:2px solid #333;border-top-color:#fafafa;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style></head>
+<body>
+<div class="card" id="card">
+  <div class="spinner"></div>
+  <h2 style="margin:0 0 8px">Finalizing connection…</h2>
+  <p style="color:#888;margin:0">Just a moment.</p>
+</div>
+<script>
+(async function(){
+  var code = ${safeCode};
+  var state = ${safeState};
+  var verifier = null;
+  try {
+    if (state) verifier = window.localStorage.getItem("openship.cloud-connect.pkce." + state);
+    if (state) window.localStorage.removeItem("openship.cloud-connect.pkce." + state);
+  } catch(e){}
+  try {
+    var res = await fetch("/api/cloud/connect-finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ code: code, codeVerifier: verifier || undefined })
+    });
+    var card = document.getElementById("card");
+    if (res.ok) {
+      card.innerHTML = '<div style="font-size:48px;margin-bottom:16px">✓</div><h2 style="margin:0 0 8px">Connected to Openship Cloud</h2><p style="color:#888;margin:0 0 24px">Your instance is now linked. You can close this window.</p>';
+      if (window.opener) setTimeout(function(){ window.close(); }, 600);
+    } else {
+      var msg = "Could not verify with Openship Cloud.";
+      try { var j = await res.json(); if (j && j.error) msg = j.error; } catch(e){}
+      card.innerHTML = '<div style="font-size:48px;margin-bottom:16px">⚠</div><h2 style="margin:0 0 8px">Connection Failed</h2><p style="color:#888;margin:0">' + msg + '</p>';
+    }
+  } catch(e){
+    var card2 = document.getElementById("card");
+    card2.innerHTML = '<div style="font-size:48px;margin-bottom:16px">⚠</div><h2 style="margin:0 0 8px">Connection Failed</h2><p style="color:#888;margin:0">Network error finalizing connection.</p>';
+  }
+})();
+</script>
+</body></html>`;
 }

@@ -16,18 +16,22 @@ const r = secureRouter(new Hono(), {
 
 /* ── CRUD + operations ─────────────────────────────────────────────── */
 r.get("/", { tag: "deployment:list" }, ctrl.list);
-r.post("/", { tag: "deployment:write" }, ctrl.create);
-r.post("/prepare", { tag: "deployment:write" }, ctrl.prepare);
+// Collection-scoped writes — no :id in the URL, controller resolves the
+// project from the JSON body. `collection: true` tells the permission
+// middleware to scope the check to the caller's org rather than demand
+// a :id param it can't supply.
+r.post("/", { tag: "deployment:write", collection: true }, ctrl.create);
+r.post("/prepare", { tag: "deployment:write", collection: true }, ctrl.prepare);
 
 /* ── Build access (creates a new deployment - no ID yet) ───────────── */
-r.post("/build/access", { tag: "deployment:write" }, ctrl.buildAccess);
+r.post("/build/access", { tag: "deployment:write", collection: true }, ctrl.buildAccess);
 
 /* ── SSL ───────────────────────────────────────────────────────────── */
 // Side-effect-free SSL status probe — uses POST only to carry hostname
 // in body. Permission required is "read"; readOnly tells the scanner
 // the POST + read combination is intentional.
 r.post("/ssl/status", { tag: "deployment:read", readOnly: true }, ctrl.sslStatus);
-r.post("/ssl/renew", { tag: "deployment:write" }, ctrl.sslRenew);
+r.post("/ssl/renew", { tag: "deployment:write", collection: true }, ctrl.sslRenew);
 
 /* ── Deployment by ID ──────────────────────────────────────────────── */
 r.get("/:id", { tag: "deployment:read" }, ctrl.getById);

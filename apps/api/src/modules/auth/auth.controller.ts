@@ -87,6 +87,10 @@ export async function getSession(c: Context) {
       headers: c.req.raw.headers,
     });
     if (realSession) {
+      // activeOrganizationId is NOT NULL at the schema level — set by
+      // the session.create.before hook in lib/auth.ts and by
+      // createLocalSession's explicit insert. No reactive backfill
+      // needed; the migration handled any legacy rows.
       return c.json(realSession);
     }
   } catch {

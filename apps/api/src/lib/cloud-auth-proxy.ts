@@ -106,6 +106,12 @@ async function createLocalSession(
     expiresAt,
     ipAddress: ipAddress ?? null,
     userAgent: userAgent ?? null,
+    // Bypasses Better Auth's session.create.before hook (direct insert),
+    // so we set activeOrganizationId explicitly to the user's
+    // deterministic personal org. provisionUser is idempotently invoked
+    // by every caller (mirrorCloudUser, ensureLocalUser, upgradeToAuth's
+    // localUser creation), so the FK target always exists by this point.
+    activeOrganizationId: `org_${userId}`,
   });
 
   return { id, token, expiresAt };
@@ -399,6 +405,154 @@ function exchangeDesktopClaim(code: string): { token: string; expiresAt: Date } 
 /** Read the current active nonce (used by catch blocks that don't have it). */
 function getActiveNonce(): string | null {
   return activeNonce;
+}
+
+// ─── Desktop + connect handoff URL validation + construction ────────────────
+//
+// Extracted from cloud-saas.controller's desktopHandoff / connectHandoff
+// handlers so the URL-validation policy (localhost-only for desktop,
+// HTTPS-or-localhost for connect, ≥1024 port for both) lives in one
+// testable place. The handlers themselves become thin: validate →
+// generate code → redirect.
+
+type ValidationFailure = { ok: false; status: 400; error: string };
+type ValidationSuccess = { ok: true; url: URL };
+type ValidationResult = ValidationSuccess | ValidationFailure;
+
+/**
+ * Parse a redirect string into a URL, rejecting empty input, invalid
+ * syntax, and any URL carrying userinfo (user:pass@host) — credentials
+ * in the URL are a well-known phishing/spoofing vector and have no
+ * business in an OAuth-style redirect.
+ */
+function parseRedirectUrl(redirect: string | undefined): ValidationResult {
+  if (!redirect) {
+    return { ok: false, status: 400, error: "Missing redirect parameter" };
+  }
+  let url: URL;
+  try {
+    url = new URL(redirect);
+  } catch {
+    return { ok: false, status: 400, error: "Invalid redirect URL" };
+  }
+  if (url.username || url.password) {
+    return { ok: false, status: 400, error: "Redirect URL must not contain userinfo" };
+  }
+  return { ok: true, url };
+}
+
+function isLocalhostHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+/**
+ * For localhost redirects, require a port ≥1024 to avoid privileged
+ * ports (which would imply a system-level service, not an ephemeral
+ * desktop / dev callback listener).
+ */
+function checkLocalhostPort(url: URL): ValidationFailure | null {
+  const port = parseInt(url.port || "80", 10);
+  if (port < 1024 || port > 65535) {
+    return { ok: false, status: 400, error: "Redirect port must be ≥ 1024" };
+  }
+  return null;
+}
+
+export function validateDesktopRedirect(redirect: string | undefined): ValidationResult {
+  const parsed = parseRedirectUrl(redirect);
+  if (!parsed.ok) return parsed;
+  const { url } = parsed;
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, status: 400, error: "Redirect must use http or https" };
+  }
+  if (!isLocalhostHostname(url.hostname)) {
+    return { ok: false, status: 400, error: "Redirect must target localhost" };
+  }
+  const portError = checkLocalhostPort(url);
+  if (portError) return portError;
+  return { ok: true, url };
+}
+
+export function validateConnectRedirect(redirect: string | undefined): ValidationResult {
+  const parsed = parseRedirectUrl(redirect);
+  if (!parsed.ok) return parsed;
+  const { url } = parsed;
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, status: 400, error: "Redirect must use http or https" };
+  }
+  if (isLocalhostHostname(url.hostname)) {
+    const portError = checkLocalhostPort(url);
+    if (portError) return portError;
+  } else if (url.protocol !== "https:") {
+    return { ok: false, status: 400, error: "Redirect must use HTTPS" };
+  }
+  return { ok: true, url };
+}
+
+interface HandoffSession {
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    emailVerified: boolean;
+    image?: string | null;
+  };
+  session: { token: string };
+}
+
+/**
+ * Unified handoff builder for both desktop (localhost callback) and
+ * connect (self-hosted callback) flows.
+ *
+ *   - When `session` is null, redirects the browser to the SaaS /login
+ *     page with `?callback=<redirect>` so post-auth routing can resume
+ *     the handoff. `loginFlow` (when provided) becomes `?flow=` on the
+ *     login URL — desktop callers pass "desktop-cloud" so the SaaS
+ *     post-auth router knows to route to /authorize; connect callers
+ *     omit it.
+ *   - When `session` is present, generates a one-time handoff code
+ *     (PKCE-bound when `codeChallenge` is supplied) and redirects the
+ *     browser to the final callback URL with `?code=<code>` (and
+ *     `?state=<state>` if state was supplied).
+ *
+ * Both `state` and `codeChallenge` are accepted in both flows — the
+ * connect flow used to ignore them, which made connect codes
+ * unprotected bearer tokens exfiltratable via CSRF on the
+ * /connect-handoff GET endpoint.
+ */
+export async function buildAuthHandoff(opts: {
+  session: HandoffSession | null;
+  redirect: URL;
+  state?: string;
+  codeChallenge?: string;
+  dashboardOrigin: string;
+  loginFlow?: string;
+}): Promise<{ kind: "login"; url: string } | { kind: "handoff"; url: string }> {
+  if (!opts.session) {
+    const loginUrl = new URL("/login", opts.dashboardOrigin);
+    loginUrl.searchParams.set("callback", opts.redirect.toString());
+    if (opts.loginFlow) loginUrl.searchParams.set("flow", opts.loginFlow);
+    if (opts.state) loginUrl.searchParams.set("state", opts.state);
+    if (opts.codeChallenge) loginUrl.searchParams.set("code_challenge", opts.codeChallenge);
+    return { kind: "login", url: loginUrl.toString() };
+  }
+
+  const code = await generateHandoffCode(
+    {
+      id: opts.session.user.id,
+      name: opts.session.user.name,
+      email: opts.session.user.email,
+      emailVerified: opts.session.user.emailVerified,
+      image: opts.session.user.image ?? null,
+    },
+    opts.session.session.token,
+    opts.codeChallenge || undefined,
+  );
+
+  const url = new URL(opts.redirect.toString());
+  url.searchParams.set("code", code);
+  if (opts.state) url.searchParams.set("state", opts.state);
+  return { kind: "handoff", url: url.toString() };
 }
 
 export {

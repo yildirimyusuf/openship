@@ -693,8 +693,10 @@ export async function getUserHome(userId: string): Promise<{
   state: GitHubConnectionState;
   accounts: MappedAccount[];
   repos: MappedRepository[];
+  errors?: Record<string, string>;
 }> {
   const state = await getGitHubConnectionState(userId);
+  const errors: Record<string, string> = {};
 
   // Nothing connected → return the empty shell. The dashboard renders
   // the connect prompt when state.primary === null.
@@ -756,7 +758,9 @@ export async function getUserHome(userId: string): Promise<{
         for (const repo of repos) repo.source = "app";
       }
     } catch (err) {
-      console.warn("[GitHub] App path failed:", (err as Error).message);
+      const message = (err as Error).message;
+      console.warn("[GitHub] App path failed:", message);
+      errors.app = message;
     }
 
     // Merge gh CLI repos when available (self-hosted + cloud-connected
@@ -799,11 +803,18 @@ export async function getUserHome(userId: string): Promise<{
         }
         repos = Array.from(byFullName.values());
       } catch (err) {
-        console.warn("[GitHub] CLI repo merge failed:", (err as Error).message);
+        const message = (err as Error).message;
+        console.warn("[GitHub] CLI repo merge failed:", message);
+        errors.cli = message;
       }
     }
 
-    return { state, accounts, repos };
+    return {
+      state,
+      accounts,
+      repos,
+      errors: Object.keys(errors).length > 0 ? errors : undefined,
+    };
   }
 
   // ── gh CLI path ────────────────────────────────────────────────────
@@ -830,8 +841,10 @@ export async function getUserHome(userId: string): Promise<{
     repos = mapRepositories(Array.isArray(data) ? data : []);
     // No per-repo source tag — App is unavailable, so badge would be redundant
     // with the page-level connect-the-App prompt.
-  } catch {
-    /* empty */
+  } catch (err) {
+    const message = (err as Error).message;
+    console.warn("[GitHub] CLI /user/repos fetch failed:", message);
+    errors.repos = message;
   }
 
   // Build account list from /user + /user/orgs using the same token.
@@ -862,11 +875,18 @@ export async function getUserHome(userId: string): Promise<{
         source: "cli",
       });
     }
-  } catch {
-    /* empty */
+  } catch (err) {
+    const message = (err as Error).message;
+    console.warn("[GitHub] CLI /user/orgs fetch failed:", message);
+    errors.orgs = message;
   }
 
-  return { state, accounts, repos };
+  return {
+    state,
+    accounts,
+    repos,
+    errors: Object.keys(errors).length > 0 ? errors : undefined,
+  };
 }
 
 // ─── Webhook strategy ────────────────────────────────────────────────────────

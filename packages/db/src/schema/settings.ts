@@ -51,6 +51,80 @@ export const instanceSettings = pgTable("instance_settings", {
   /** Default number of previous successful bare releases to retain for rollback */
   defaultRollbackWindow: integer("default_rollback_window").notNull().default(5),
 
+  /**
+   * Source that drives `sendInvitationEmail` in `lib/auth.ts`:
+   *   "platform" → use the provisioned mail server (preferSource="platform")
+   *   "cloud"    → relay through Openship Cloud (stub today; falls back to
+   *                env-based SMTP via lib/mail.ts until the cloud
+   *                send-invitation endpoint exists)
+   *
+   * Default is "platform" — operators with a provisioned mail server
+   * almost always want invites stamped with their own brand. Cloud-only
+   * deployments can flip this to "cloud" to keep delivery routed
+   * through the central relay.
+   */
+  invitationMailSource: text("invitation_mail_source")
+    .notNull()
+    .default("platform"),
+
+  // ── Team-mode migration ────────────────────────────────────────────────────
+  //
+  // Tracks whether this instance has been migrated to a multi-user
+  // deployment (operator's VPS or Openship Cloud). When non-default,
+  // the dashboard becomes a launcher pointing at `migrationTargetUrl`
+  // and the API only serves a minimal surface (auth + switch-back).
+  //
+  //   "single_user"          → default, normal operation
+  //   "self_hosted_remote"   → migrated to operator's own VPS (URL set)
+  //   "cloud_hosted"         → migrated to Openship Cloud (URL set)
+  //   "tunneled"             → exposed via an Oblien edge tunnel routed at
+  //                            this machine's dashboard port (no data move)
+  //
+  // Transitions are one-shot via the migration wizards. Reverse migration
+  // back to single_user copies the data back and disconnects teammates.
+
+  teamMode: text("team_mode").notNull().default("single_user"),
+  /** Public URL where this instance now lives (null when teamMode='single_user'). */
+  migrationTargetUrl: text("migration_target_url"),
+  /**
+   * For path A (self_hosted_remote): the server row id this instance
+   * was migrated to. Needed by switch-back so we can SSH into the
+   * right VPS to pull the latest dump back. Null for path B and
+   * single_user.
+   */
+  migrationServerId: text("migration_server_id"),
+  /** ISO timestamp of the migration (forensic). */
+  migratedAt: timestamp("migrated_at"),
+  /**
+   * Oblien tunnel slug (the host portion, e.g. "myteam" for
+   * "myteam.opsh.io" / "myteam-<suffix>.preview.oblien.com"). Set when
+   * teamMode transitions through the tunneled path. Null otherwise.
+   */
+  tunnelSlug: text("tunnel_slug"),
+  /**
+   * Oblien-side tunnel id, retained so switch-back / update flows can
+   * call Oblien's delete/update endpoints without re-resolving by slug.
+   * Null when no tunnel has been provisioned for this instance.
+   */
+  tunnelId: text("tunnel_id"),
+
+  /**
+   * True while a migration is in flight (data is being dumped, shipped,
+   * or restored). Refuses local mutations via migrationGuard middleware
+   * to prevent writes from silently being lost or causing divergence
+   * between this instance and the migration target. Cleared in the
+   * finally block of withMigrationLock so the operator is never locked
+   * out beyond the cutover window itself.
+   */
+  migrationInProgress: boolean("migration_in_progress").notNull().default(false),
+  /**
+   * When the current migration started. Lets the next acquire attempt
+   * auto-recover a stale lock if a previous migration's process died
+   * mid-flight (default stale threshold: 10 minutes). Null when no
+   * migration is in flight.
+   */
+  migrationStartedAt: timestamp("migration_started_at"),
+
   // ── Timestamps ─────────────────────────────────────────────────────────────
 
   createdAt: timestamp("created_at").notNull().defaultNow(),

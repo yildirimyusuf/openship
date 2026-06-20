@@ -113,6 +113,9 @@ export interface CloudAdminProxy {
     slug: string;
     domain?: string;
   }) => Promise<{ page: { slug: string; url?: string | null } }>;
+  disablePage?: (slug: string) => Promise<void>;
+  enablePage?: (slug: string) => Promise<void>;
+  deletePage?: (slug: string) => Promise<void>;
 }
 
 function primaryPublicEndpoint(config: Pick<DeployConfig, "publicEndpoints">): DeployPrimaryEndpoint | undefined {
@@ -1568,7 +1571,12 @@ fi`;
 
   async stop(containerId: string): Promise<void> {
     if (containerId.startsWith("page:")) {
-      await this.client.pages.disable(containerId.slice(5));
+      const slug = containerId.slice(5);
+      if (this.adminProxy?.disablePage) {
+        await this.adminProxy.disablePage(slug);
+      } else {
+        await this.client.pages.disable(slug);
+      }
     } else {
       await this.ws(containerId).stop();
     }
@@ -1576,7 +1584,12 @@ fi`;
 
   async start(containerId: string): Promise<void> {
     if (containerId.startsWith("page:")) {
-      await this.client.pages.enable(containerId.slice(5));
+      const slug = containerId.slice(5);
+      if (this.adminProxy?.enablePage) {
+        await this.adminProxy.enablePage(slug);
+      } else {
+        await this.client.pages.enable(slug);
+      }
     } else {
       await this.ws(containerId).start();
     }
@@ -1592,7 +1605,12 @@ fi`;
 
   async destroy(containerId: string): Promise<void> {
     if (containerId.startsWith("page:")) {
-      await this.client.pages.delete(containerId.slice(5));
+      const slug = containerId.slice(5);
+      if (this.adminProxy?.deletePage) {
+        await this.adminProxy.deletePage(slug);
+      } else {
+        await this.client.pages.delete(slug);
+      }
     } else {
       await this.ws(containerId).delete();
       this.builtArtifacts.delete(containerId);
@@ -1649,8 +1667,13 @@ fi`;
     // Page deployments: disable the page. Disk goes nowhere; the page
     // record itself IS the artifact.
     if (deployment.containerId?.startsWith("page:")) {
+      const slug = deployment.containerId.slice(5);
       try {
-        await this.client.pages.disable(deployment.containerId.slice(5));
+        if (this.adminProxy?.disablePage) {
+          await this.adminProxy.disablePage(slug);
+        } else {
+          await this.client.pages.disable(slug);
+        }
       } catch {
         // already disabled
       }
@@ -1685,8 +1708,13 @@ fi`;
   async purge(deployment: DeploymentRef): Promise<void> {
     // Page deployment — delete the page record.
     if (deployment.containerId?.startsWith("page:")) {
+      const slug = deployment.containerId.slice(5);
       try {
-        await this.client.pages.delete(deployment.containerId.slice(5));
+        if (this.adminProxy?.deletePage) {
+          await this.adminProxy.deletePage(slug);
+        } else {
+          await this.client.pages.delete(slug);
+        }
       } catch {
         // already destroyed
       }

@@ -17,28 +17,55 @@
  */
 
 import type { Context } from "hono";
-import { Oblien } from "@repo/adapters";
-import { SYSTEM, safeErrorMessage } from "@repo/core";
 import { getActiveOrganizationId, getUserId } from "../../lib/controller-helpers";
-import { auth, COOKIE_PREFIX } from "../../lib/auth";
+import { auth } from "../../lib/auth";
 import { issueNamespaceToken } from "../../lib/openship-cloud";
-import { generateHandoffCode, exchangeHandoffCode } from "../../lib/cloud-auth-proxy";
+import {
+  exchangeHandoffCode,
+  validateDesktopRedirect,
+  validateConnectRedirect,
+  buildAuthHandoff,
+} from "../../lib/cloud-auth-proxy";
 import { runCloudPreflight } from "../../lib/cloud-preflight";
-import { cloudRuntimeTarget, env } from "../../config/env";
-import { repos, db, schema, eq, and } from "@repo/db";
-import { createEphemeralStore } from "../../lib/ephemeral-store";
+import { cloudRuntimeTarget } from "../../config/env";
 import * as githubAuth from "../github/github.auth";
-
-/**
- * Mint a namespace-scoped Oblien client for the caller's active org.
- * The namespace is bound to the org id (not the user id) so team
- * members all share one namespace and owner rotation never moves it.
- * Used by analyticsProxy, syncEdgeProxy, pagesProxy.
- */
-async function getNamespaceClient(organizationId: string): Promise<Oblien> {
-  const { token } = await issueNamespaceToken(organizationId);
-  return new Oblien({ token });
-}
+import {
+  proxyCloudAnalytics,
+  CloudAnalyticsForbiddenError,
+  type CloudAnalyticsOperation,
+} from "./cloud-analytics.service";
+import { revokeCloudSession } from "./cloud-session.service";
+import { syncCloudEdgeProxy } from "./cloud-edge-proxy.service";
+import {
+  createCloudPage,
+  dispatchCloudPageAction,
+} from "./cloud-pages.service";
+import { sendCloudInvitation } from "./cloud-invitations.service";
+import {
+  ingestSubgraph,
+  exportSubgraph,
+  IngestValidationError,
+  IngestTargetNotEmptyError,
+} from "./cloud-ingest.service";
+import {
+  DUMP_FORMAT_VERSION,
+  PkCollisionError,
+  db,
+  schema,
+  and,
+  eq,
+  type DatabaseDump,
+  type SubgraphScope,
+} from "@repo/db";
+import {
+  startGithubLinkFromBridgeToken,
+  buildOrgScopedInstallUrl,
+  attributeGithubInstall,
+  listOrgInstallations,
+  mintOrgInstallationToken,
+  oauthBridgeStore,
+  OAUTH_BRIDGE_TTL_MS,
+} from "./cloud-github.service";
 
 /** Coerce a thrown Oblien SDK error into an HTTP response shape. */
 function oblienErrorResponse(c: Context, err: unknown, fallback: string) {
@@ -55,27 +82,6 @@ function oblienErrorResponse(c: Context, err: unknown, fallback: string) {
   return c.json({ error: message, code });
 }
 
-/**
- * Resolve the active org's owner — used ONLY for GitHub operations
- * where the App installations are still owner-keyed (the user who
- * installed the App owns the gitInstallation rows). Cloud namespace
- * operations skip this: they use `getActiveOrganizationId(c)`
- * directly and Oblien's namespace = org id.
- */
-async function resolveCloudOwner(
-  c: Context,
-): Promise<{ ownerUserId: string; organizationId: string }> {
-  const organizationId = getActiveOrganizationId(c);
-  const members = await repos.member.listByOrganization(organizationId);
-  const owner = members.find((m) => m.role === "owner");
-  if (!owner) {
-    throw new Error(
-      `Organization ${organizationId} has no owner — cannot resolve cloud bearer`,
-    );
-  }
-  return { ownerUserId: owner.userId, organizationId };
-}
-
 // ─── Cloud analytics proxy ──────────────────────────────────────────────────
 
 /**
@@ -90,28 +96,23 @@ async function resolveCloudOwner(
 export async function analyticsProxy(c: Context) {
   const organizationId = getActiveOrganizationId(c);
   const { operation, domain, params } = await c.req.json<{
-    operation: "timeseries" | "requests" | "streamToken";
+    operation: CloudAnalyticsOperation;
     domain: string;
     params?: Record<string, unknown>;
   }>();
-
   if (!operation || !domain) {
     return c.json({ error: "operation and domain are required" }, 400);
   }
-
+  if (operation !== "timeseries" && operation !== "requests" && operation !== "streamToken") {
+    return c.json({ error: "Unknown operation" }, 400);
+  }
   try {
-    const client = await getNamespaceClient(organizationId);
-    switch (operation) {
-      case "timeseries":
-        return c.json(await client.analytics.timeseries(domain, params as any));
-      case "requests":
-        return c.json(await client.analytics.requests(domain, params as any));
-      case "streamToken":
-        return c.json(await client.analytics.streamToken(domain));
-      default:
-        return c.json({ error: "Unknown operation" }, 400);
-    }
+    const result = await proxyCloudAnalytics(organizationId, { operation, domain, params });
+    return c.json({ data: result });
   } catch (err) {
+    if (err instanceof CloudAnalyticsForbiddenError) {
+      return c.json({ error: err.message }, 403);
+    }
     return oblienErrorResponse(c, err, "Analytics request failed");
   }
 }
@@ -153,43 +154,15 @@ export async function preflight(c: Context) {
 export async function disconnect(c: Context) {
   const session = c.get("session") as { id?: string; token?: string } | undefined;
   const user = c.get("user") as { id?: string } | undefined;
-  if (!session?.id) {
-    return c.json({ ok: true }, 200);
+  const result = await revokeCloudSession({
+    sessionId: session?.id,
+    userId: user?.id,
+    clientIp: c.var.clientIp,
+    userAgent: c.req.header("user-agent") ?? null,
+  });
+  if (!result.ok) {
+    return c.json({ error: result.error }, 500);
   }
-  try {
-    await db.delete(schema.session).where(eq(schema.session.id, session.id));
-  } catch (err) {
-    console.error(
-      "[cloud disconnect] failed to delete session row:",
-      safeErrorMessage(err),
-    );
-    return c.json({ error: "Failed to revoke session" }, 500);
-  }
-
-  // SaaS users each have a personal org (`org_<userId>`) provisioned at
-  // signup. Audit against that so a security reviewer can reconstruct
-  // "who disconnected which device when".
-  if (user?.id) {
-    await repos.auditEvent
-      .create({
-        organizationId: `org_${user.id}`,
-        actorUserId: user.id,
-        eventType: "cloud.disconnect",
-        resourceType: "cloud",
-        resourceId: session.id,
-        ipAddress: c.var.clientIp,
-        userAgent: c.req.header("user-agent") ?? null,
-        before: null,
-        after: null,
-      })
-      .catch((err) =>
-        console.warn(
-          "[cloud disconnect] audit emit failed:",
-          safeErrorMessage(err),
-        ),
-      );
-  }
-
   return c.json({ ok: true });
 }
 
@@ -222,56 +195,22 @@ export async function account(c: Context) {
  *   - code_challenge (PKCE S256) is bound to the one-time code
  */
 export async function desktopHandoff(c: Context) {
-  const redirect = c.req.query("redirect");
-  if (!redirect) {
-    return c.json({ error: "Missing redirect parameter" }, 400);
-  }
-
-  let url: URL;
-  try {
-    url = new URL(redirect);
-  } catch {
-    return c.json({ error: "Invalid redirect URL" }, 400);
-  }
-  if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-    return c.json({ error: "Redirect must target localhost" }, 400);
-  }
-  const port = parseInt(url.port || "80", 10);
-  if (port < 1024 || port > 65535) {
-    return c.json({ error: "Redirect port must be ≥ 1024" }, 400);
-  }
-
-  const state = c.req.query("state");
   const codeChallenge = c.req.query("code_challenge");
-
-  // No session → bounce to /login. Desktop PKCE flow needs the
-  // state + code_challenge to survive the round-trip; carry them on
-  // the query so `getPostAuthRedirect` routes to /authorize.
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session) {
-    const loginUrl = new URL("/login", cloudRuntimeTarget.dashboard);
-    loginUrl.searchParams.set("callback", redirect);
-    loginUrl.searchParams.set("flow", "desktop-cloud");
-    if (state) loginUrl.searchParams.set("state", state);
-    if (codeChallenge) loginUrl.searchParams.set("code_challenge", codeChallenge);
-    return c.redirect(loginUrl.toString());
+  if (!codeChallenge || !/^[A-Za-z0-9_-]{40,128}$/.test(codeChallenge)) {
+    return c.json({ error: "code_challenge query parameter is required", code: "MISSING_CODE_CHALLENGE" }, 400);
   }
-
-  const code = await generateHandoffCode(
-    {
-      id: session.user.id,
-      name: session.user.name,
-      email: session.user.email,
-      emailVerified: session.user.emailVerified,
-      image: session.user.image,
-    },
-    session.session.token,
-    codeChallenge || undefined,
-  );
-
-  url.searchParams.set("code", code);
-  if (state) url.searchParams.set("state", state);
-  return c.redirect(url.toString());
+  const validation = validateDesktopRedirect(c.req.query("redirect"));
+  if (!validation.ok) return c.json({ error: validation.error }, validation.status);
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  const result = await buildAuthHandoff({
+    session,
+    redirect: validation.url,
+    state: c.req.query("state"),
+    codeChallenge,
+    dashboardOrigin: cloudRuntimeTarget.dashboard,
+    loginFlow: "desktop-cloud",
+  });
+  return c.redirect(result.url);
 }
 
 // ─── Self-hosted connect handoff ─────────────────────────────────────────────
@@ -284,52 +223,21 @@ export async function desktopHandoff(c: Context) {
  *   - Codes are single-use with 60s TTL
  */
 export async function connectHandoff(c: Context) {
-  const redirect = c.req.query("redirect");
-  if (!redirect) {
-    return c.json({ error: "Missing redirect parameter" }, 400);
+  const codeChallenge = c.req.query("code_challenge");
+  if (!codeChallenge || !/^[A-Za-z0-9_-]{40,128}$/.test(codeChallenge)) {
+    return c.json({ error: "code_challenge query parameter is required", code: "MISSING_CODE_CHALLENGE" }, 400);
   }
-
-  let url: URL;
-  try {
-    url = new URL(redirect);
-  } catch {
-    return c.json({ error: "Invalid redirect URL" }, 400);
-  }
-
-  const isLocalhost = url.hostname === "localhost" || url.hostname === "127.0.0.1";
-  if (!isLocalhost && url.protocol !== "https:") {
-    return c.json({ error: "Redirect must use HTTPS" }, 400);
-  }
-  if (isLocalhost) {
-    const port = parseInt(url.port || "80", 10);
-    if (port < 1024 || port > 65535) {
-      return c.json({ error: "Redirect port must be ≥ 1024" }, 400);
-    }
-  }
-
-  // No session → bounce to /login with the local-callback URL.
-  // /login's post-auth handler reads `?callback=` and forwards to
-  // the handoff URL after a successful sign-in.
+  const validation = validateConnectRedirect(c.req.query("redirect"));
+  if (!validation.ok) return c.json({ error: validation.error }, validation.status);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session) {
-    const loginUrl = new URL("/login", cloudRuntimeTarget.dashboard);
-    loginUrl.searchParams.set("callback", redirect);
-    return c.redirect(loginUrl.toString());
-  }
-
-  const code = await generateHandoffCode(
-    {
-      id: session.user.id,
-      name: session.user.name,
-      email: session.user.email,
-      emailVerified: session.user.emailVerified,
-      image: session.user.image,
-    },
-    session.session.token,
-  );
-
-  url.searchParams.set("code", code);
-  return c.redirect(url.toString());
+  const result = await buildAuthHandoff({
+    session,
+    redirect: validation.url,
+    state: c.req.query("state"),
+    codeChallenge,
+    dashboardOrigin: cloudRuntimeTarget.dashboard,
+  });
+  return c.redirect(result.url);
 }
 
 // ─── Code exchange (no auth - code is the credential) ────────────────────────
@@ -369,27 +277,10 @@ export async function syncEdgeProxy(c: Context) {
   if (!body.slug || !body.target) {
     return c.json({ error: "slug and target are required" }, 400);
   }
-
-  const slug = body.slug
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  if (!slug) {
-    return c.json({ error: "Invalid slug" }, 400);
-  }
-
-  const baseDomain = SYSTEM.DOMAINS.CLOUD_DOMAIN;
-  const hostname = `${slug}.${baseDomain}`;
-  const target =
-    body.target.startsWith("http://") || body.target.startsWith("https://")
-      ? body.target
-      : `http://${body.target}`;
-
   try {
-    const client = await getNamespaceClient(organizationId);
-    await client.edgeProxy.create({ name: hostname, slug, domain: baseDomain, target });
-    return c.json({ ok: true, hostname });
+    const result = await syncCloudEdgeProxy(organizationId, { slug: body.slug, target: body.target });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, hostname: result.hostname });
   } catch (err) {
     return oblienErrorResponse(c, err, "Failed to sync edge proxy");
   }
@@ -417,23 +308,240 @@ export async function pagesProxy(c: Context) {
     slug?: string;
     domain?: string;
   }>();
-
   if (!body.workspace_id || !body.path || !body.name || !body.slug) {
     return c.json({ error: "workspace_id, path, name and slug are required" }, 400);
   }
-
   try {
-    const client = await getNamespaceClient(organizationId);
-    const result = await client.pages.create({
+    const result = await createCloudPage(organizationId, {
       workspace_id: body.workspace_id,
       path: body.path,
       name: body.name,
       slug: body.slug,
-      ...(body.domain ? { domain: body.domain } : {}),
+      domain: body.domain,
     });
     return c.json(result);
   } catch (err) {
     return oblienErrorResponse(c, err, "Failed to create page");
+  }
+}
+
+/**
+ * POST /api/cloud/pages/disable  { slug }
+ *
+ * Forwards via the caller's namespace token. Oblien rejects slugs
+ * that don't belong to the namespace with 403/404, surfaced here as
+ * 403 by isCrossTenantError. No SaaS-side ownership check needed —
+ * the namespace IS the tenant boundary, sourced from the session.
+ */
+export async function pagesDisable(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req.json<{ slug?: string }>();
+  if (!body.slug) return c.json({ error: "slug is required" }, 400);
+  try {
+    const result = await dispatchCloudPageAction(organizationId, body.slug, "disable");
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Failed to disable page");
+  }
+}
+
+/**
+ * POST /api/cloud/pages/enable  { slug }
+ *
+ * Forwards via the caller's namespace token. Oblien rejects slugs
+ * that don't belong to the namespace with 403/404, surfaced here as
+ * 403 by isCrossTenantError. No SaaS-side ownership check needed —
+ * the namespace IS the tenant boundary, sourced from the session.
+ */
+export async function pagesEnable(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req.json<{ slug?: string }>();
+  if (!body.slug) return c.json({ error: "slug is required" }, 400);
+  try {
+    const result = await dispatchCloudPageAction(organizationId, body.slug, "enable");
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Failed to enable page");
+  }
+}
+
+/**
+ * POST /api/cloud/pages/delete  { slug }
+ *
+ * Forwards via the caller's namespace token. Oblien rejects slugs
+ * that don't belong to the namespace with 403/404, surfaced here as
+ * 403 by isCrossTenantError. No SaaS-side ownership check needed —
+ * the namespace IS the tenant boundary, sourced from the session.
+ */
+export async function pagesDelete(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req.json<{ slug?: string }>();
+  if (!body.slug) return c.json({ error: "slug is required" }, 400);
+  try {
+    const result = await dispatchCloudPageAction(organizationId, body.slug, "delete");
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Failed to delete page");
+  }
+}
+
+// ─── Invitation relay ───────────────────────────────────────────────────────
+
+/**
+ * POST /api/cloud/send-invitation  { to, subject, html, text }
+ *
+ * Local self-hosted instances POST here when their operator has set
+ * `invitationMailSource = "cloud"` in instance_settings. The SaaS sends
+ * the email from its own mail infrastructure on the local instance's
+ * behalf — useful for self-hosted deployments that don't want to run
+ * their own SMTP server.
+ *
+ * Auth: cloudSessionAuth (Bearer cloud session) resolves the org owner;
+ * the active organization is read from middleware as for every other
+ * org-scoped endpoint.
+ *
+ * Rate-limit: capped at 20/hour per org inside the service so a
+ * compromised local can't spam invitations through us.
+ */
+export async function sendInvitation(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req.json<{
+    to?: string;
+    subject?: string;
+    html?: string;
+    text?: string;
+  }>();
+  if (!body.to || !body.subject || !body.html || !body.text) {
+    return c.json({ error: "to, subject, html and text are required" }, 400);
+  }
+  try {
+    const result = await sendCloudInvitation(organizationId, {
+      to: body.to,
+      subject: body.subject,
+      html: body.html,
+      text: body.text,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, messageId: result.messageId });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Failed to send invitation");
+  }
+}
+
+// ─── Subgraph ingest/export (unified primitives) ─────────────────────────────
+
+/**
+ * POST /api/cloud/ingest-subgraph  { dump, allowNonEmptyTarget? }
+ *
+ * Generalised forward primitive. Accepts an organization-scope or
+ * project-scope dump. The instance-scope rejection is enforced inside
+ * ingestSubgraph.
+ */
+export async function ingestSubgraphHandler(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const user = c.get("user") as { id: string } | undefined;
+  if (!user) {
+    return c.json({ error: "No authenticated user" }, 401);
+  }
+  const body = await c.req.json<{
+    dump?: DatabaseDump;
+    allowNonEmptyTarget?: boolean;
+  }>();
+  if (!body.dump) {
+    return c.json({ error: "dump is required" }, 400);
+  }
+  if (body.dump.formatVersion !== DUMP_FORMAT_VERSION) {
+    return c.json(
+      {
+        error: `Dump format ${body.dump.formatVersion} incompatible with this SaaS (expected ${DUMP_FORMAT_VERSION}). Update your local instance and re-dump.`,
+        code: "INGEST_FORMAT_MISMATCH",
+      },
+      412,
+    );
+  }
+  try {
+    const result = await ingestSubgraph({
+      userId: user.id,
+      organizationId,
+      dump: body.dump,
+      allowNonEmptyTarget: body.allowNonEmptyTarget,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof IngestTargetNotEmptyError) {
+      return c.json(
+        { error: err.message, code: err.code, projectCount: err.projectCount },
+        409,
+      );
+    }
+    if (err instanceof IngestValidationError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    if (err instanceof PkCollisionError) {
+      // Duplicate-PK on the subgraph restore — typically the operator
+      // is re-submitting an already-transferred project. Surface as a
+      // typed 409 so the dashboard wizard can offer a clean "already
+      // transferred" remediation instead of an opaque 500.
+      return c.json(
+        { error: err.message, code: err.code, table: err.table },
+        409,
+      );
+    }
+    return oblienErrorResponse(c, err, "Subgraph ingest failed");
+  }
+}
+
+/**
+ * POST /api/cloud/export-subgraph  { scope }
+ *
+ * Caller picks the scope shape (organization == team-mode switch-back,
+ * project == project transfer to-self-hosted). Instance scope is refused.
+ */
+export async function exportSubgraphHandler(c: Context) {
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req
+    .json<{ scope?: SubgraphScope }>()
+    .catch(() => ({} as { scope?: SubgraphScope }));
+  const scope: SubgraphScope = body.scope ?? { kind: "organization", organizationId };
+
+  if (scope.kind === "instance") {
+    return c.json(
+      { error: "Instance-scope export is not permitted on the SaaS.", code: "EXPORT_SCOPE_DENIED" },
+      403,
+    );
+  }
+  if (scope.kind === "organization" && scope.organizationId !== organizationId) {
+    return c.json(
+      { error: "Cannot export another organization.", code: "EXPORT_SCOPE_DENIED" },
+      403,
+    );
+  }
+  if (scope.kind === "project") {
+    const owned = await db
+      .select({ id: schema.project.id })
+      .from(schema.project)
+      .where(
+        and(
+          eq(schema.project.id, scope.projectId),
+          eq(schema.project.organizationId, organizationId),
+        ),
+      );
+    if (owned.length === 0) {
+      return c.json(
+        { error: "Project not found in caller's organization.", code: "EXPORT_SCOPE_DENIED" },
+        404,
+      );
+    }
+  }
+
+  try {
+    const dump = await exportSubgraph(scope);
+    return c.json({ ok: true, dump });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Subgraph export failed");
   }
 }
 
@@ -449,15 +557,6 @@ export async function pagesProxy(c: Context) {
 // that user's id. Each cloud user's installations / OAuth identity are
 // already managed by the existing local github code paths, so we just reuse
 // them — this controller is a thin policy/translation layer.
-
-// Install state lifecycle now lives in lib/github-install-state.ts so the
-// webhook handler can also use it as an attribution fallback when the
-// install-callback path isn't reachable. See that file for the full
-// security contract.
-import {
-  issueInstallState,
-  peekAndConsumeInstallState,
-} from "../../lib/github-install-state";
 
 // ─── OAuth bridge (browser-session handoff for linkSocialAccount) ───────────
 //
@@ -486,28 +585,6 @@ import {
 // succeed, getUserToken will return the user's OAuth token, and
 // getUserInstallations will work end-to-end.
 
-interface OauthBridgeRow {
-  userId: string;
-  sessionToken: string;
-}
-const OAUTH_BRIDGE_TTL_MS = 5 * 60 * 1000;
-// Adapter-backed store — swap to Redis/DB without touching call sites
-// when the SaaS scales beyond a single replica. See lib/ephemeral-store.ts.
-const oauthBridgeStore = createEphemeralStore<OauthBridgeRow>();
-
-function getSetCookieHeaders(headers: Headers): string[] {
-  // Node 18+ exposes getSetCookie on Headers; fall back for older envs.
-  const anyHeaders = headers as Headers & { getSetCookie?: () => string[] };
-  if (typeof anyHeaders.getSetCookie === "function") {
-    return anyHeaders.getSetCookie();
-  }
-  const out: string[] = [];
-  headers.forEach((value, key) => {
-    if (key.toLowerCase() === "set-cookie") out.push(value);
-  });
-  return out;
-}
-
 // ─── GitHub Connect flow: architecture overview ─────────────────────────────
 //
 // SaaS-only OAuth + install flow. Local self-hosted instances NEVER hold
@@ -528,9 +605,9 @@ function getSetCookieHeaders(headers: Headers): string[] {
 // Security invariants:
 //   - The popup browser NEVER receives the SaaS Better Auth session
 //     cookie. Only the oauth_state cookies are forwarded (see the
-//     allowedCookieNames filter in githubOauthBridge below). The state
-//     cookie itself carries the {link: {email, userId}} binding all the
-//     way to GitHub's callback, and Better Auth's callback handler
+//     allowedCookieNames filter in filterForwardableStateCookies). The
+//     state cookie itself carries the {link: {email, userId}} binding all
+//     the way to GitHub's callback, and Better Auth's callback handler
 //     (callback.mjs:102-128) reads userId from the decrypted state — it
 //     never consults c.context.session for link flows.
 //   - The bridge token in /oauth-bridge?token=<> is single-use AND
@@ -590,138 +667,49 @@ export async function githubOauthHandoff(c: Context) {
  * `account` row scoped to them.
  */
 export async function githubOauthBridge(c: Context) {
-  const token = c.req.query("token");
-  if (!token) {
-    return c.html(
-      renderCallbackHtml(
-        "Missing bridge token",
-        "GitHub OAuth bridge URL is malformed. Try connecting again from the dashboard.",
-      ),
-      400,
-    );
-  }
-
-  const bridge = await oauthBridgeStore.consume(token);
-  if (!bridge) {
-    return c.html(
-      renderCallbackHtml(
-        "OAuth link expired",
-        "This GitHub OAuth bridge link expired or was already used. Try connecting again.",
-      ),
-      401,
-    );
-  }
-
-  try {
-    // The Better Auth `bearer` plugin (configured in lib/auth.ts) accepts
-    // `Authorization: Bearer <session.token>` and converts it to the
-    // signed cookie format internally. This avoids us having to
-    // hand-construct the signed cookie value (which is what was failing
-    // before — Better Auth's wire format is very particular about
-    // encoding + ordering and getting it wrong silently returns 401).
-    const linkHeaders = new Headers();
-    linkHeaders.set("Authorization", `Bearer ${bridge.sessionToken}`);
-
-    const linkResult = await auth.api.linkSocialAccount({
-      body: {
-        provider: "github",
-        callbackURL: `${cloudRuntimeTarget.api}/api/cloud/github/oauth-success`,
-        disableRedirect: true,
-      },
-      headers: linkHeaders,
-      asResponse: true,
-    });
-
-    if (linkResult instanceof Response) {
-      // Read the body ONCE into text up-front. Trying to .clone() after
-      // .json() throws "Body has already been consumed" — so we capture
-      // the bytes once and parse the same string for both the success
-      // path (looking for { url }) and the error log fallback.
-      const status = linkResult.status;
-      const bodyText = await linkResult.text().catch(() => "");
-
-      let redirectUrl: string | null = linkResult.headers.get("location");
-      if (!redirectUrl && bodyText) {
-        try {
-          const body = JSON.parse(bodyText) as { url?: string };
-          redirectUrl = body?.url ?? null;
-        } catch {
-          // Not JSON; redirectUrl stays null and we log below.
-        }
-      }
-
-      if (redirectUrl) {
-        const response = c.redirect(redirectUrl);
-
-        // SECURITY INVARIANT: forward ONLY the OAuth state cookies, NEVER
-        // the SaaS session cookie. The state cookie carries the encrypted
-        // link.userId binding (better-auth/dist/state.mjs lines 14-19,
-        // callback.mjs:102-128 reads link.userId straight out of the
-        // decrypted state — it never consults c.context.session). So the
-        // popup browser doesn't need any session cookie to complete the
-        // OAuth callback.
-        //
-        // If we ever forwarded the SaaS session cookie here, we'd silently
-        // log the popup window into the SaaS dashboard at api.openship.io
-        // from a popup opened by a local self-hosted instance — that's
-        // confused-deputy territory. Future Better Auth versions might
-        // start emitting unexpected Set-Cookie headers during
-        // linkSocialAccount; this allowlist makes that change inert.
-        // Better Auth's default state strategy is verification-table-backed
-        // (picked because `database: drizzleAdapter(...)` is set in lib/auth.ts),
-        // and that strategy names the signed state cookie "state" — NOT
-        // "oauth_state". See node_modules/better-auth/dist/state.mjs:43
-        // (`settings?.cookieName ?? "state"`). The "oauth_state" name only
-        // applies when advanced.storeStateStrategy === "cookie". We forward
-        // both names so this stays correct if the strategy ever changes.
-        const allowedCookieNames = [
-          "state",                                       // default (verification-table) strategy
-          `${COOKIE_PREFIX}.state`,                      // prefixed
-          `__Secure-${COOKIE_PREFIX}.state`,             // secure-prefixed (HTTPS prod)
-          "oauth_state",                                 // cookie-strategy default name
-          `${COOKIE_PREFIX}.oauth_state`,                // cookie-strategy prefixed
-          `__Secure-${COOKIE_PREFIX}.oauth_state`,       // cookie-strategy secure-prefixed
-        ];
-        const linkCookies = getSetCookieHeaders(linkResult.headers);
-        const forwarded: string[] = [];
-        for (const cookie of linkCookies) {
-          const cookieName = cookie.split("=")[0]?.trim() ?? "";
-          if (allowedCookieNames.some((n) => cookieName === n || cookieName.startsWith(`${n}.`))) {
-            response.headers.append("Set-Cookie", cookie);
-            forwarded.push(cookieName);
-          }
-        }
-        console.log(
-          `[github oauth-bridge] hit userId=${bridge.userId} → GitHub OAuth (forwarded ${forwarded.length} state cookie(s): ${forwarded.join(", ")})`,
-        );
-        return response;
-      }
-
-      // No URL — log the actual response body so we can see what Better
-      // Auth is complaining about. Without this we just see "no URL" and
-      // have no signal on whether it's an auth issue, a config issue,
-      // or something else.
-      console.error(
-        `[github oauth-bridge] linkSocialAccount returned no URL — status=${status} body=${bodyText.slice(0, 300)}`,
+  const result = await startGithubLinkFromBridgeToken(c.req.query("token"));
+  switch (result.kind) {
+    case "missing-token":
+      return c.html(
+        renderCallbackHtml(
+          "Missing bridge token",
+          "GitHub OAuth bridge URL is malformed. Try connecting again from the dashboard.",
+        ),
+        400,
       );
+    case "expired":
+      return c.html(
+        renderCallbackHtml(
+          "OAuth link expired",
+          "This GitHub OAuth bridge link expired or was already used. Try connecting again.",
+        ),
+        401,
+      );
+    case "redirect": {
+      const response = c.redirect(result.url);
+      for (const cookie of result.forwardCookies) response.headers.append("Set-Cookie", cookie);
+      console.log(
+        `[github oauth-bridge] hit userId=${result.userId} → GitHub OAuth (forwarded ${result.forwardedNames.length} state cookie(s): ${result.forwardedNames.join(", ")})`,
+      );
+      return response;
     }
-
-    return c.html(
-      renderCallbackHtml(
-        "OAuth start failed",
-        "Could not start GitHub OAuth. Try again or check the server logs.",
-      ),
-      500,
-    );
-  } catch (err) {
-    console.error("[github oauth-bridge] failed:", err);
-    return c.html(
-      renderCallbackHtml(
-        "OAuth start failed",
-        err instanceof Error ? err.message : "Unknown error",
-      ),
-      500,
-    );
+    case "no-url":
+      console.error(
+        `[github oauth-bridge] linkSocialAccount returned no URL — status=${result.status} body=${result.bodySnippet}`,
+      );
+      return c.html(
+        renderCallbackHtml(
+          "OAuth start failed",
+          "Could not start GitHub OAuth. Try again or check the server logs.",
+        ),
+        500,
+      );
+    case "failed":
+      console.error("[github oauth-bridge] failed:", result.error);
+      return c.html(
+        renderCallbackHtml("OAuth start failed", result.error),
+        500,
+      );
   }
 }
 
@@ -754,23 +742,10 @@ export async function githubOauthSuccess(c: Context) {
  * a SaaS session cookie on the popup browser (the App's Setup URL on
  * github.com should be pointed at /api/cloud/github/install-callback
  * below — that handler does the attribution).
- *
- * Pre-condition: the caller has already completed GitHub OAuth via
- * /api/cloud/github/oauth-handoff. After OAuth, Better Auth has an
- * `account` row with providerId='github' for this user, so the install
- * webhook's findUserByGitHubId will succeed regardless of whether the
- * App's Setup URL is configured (defense in depth — install-callback
- * is the explicit path, webhook is the implicit path).
  */
 export async function githubInstallUrl(c: Context) {
-  // Bind the install state to the org OWNER — the resulting GitHub
-  // installation belongs to the org, not the team member who clicked
-  // Install. Every team member sees + uses the same installations via
-  // resolveCloudOwner. Solo SaaS users (personal org) bind to themselves.
-  const { ownerUserId } = await resolveCloudOwner(c);
-  const state = await issueInstallState(ownerUserId);
-  const baseUrl = githubAuth.getInstallUrl();
-  const url = `${baseUrl}?state=${encodeURIComponent(state)}`;
+  const organizationId = getActiveOrganizationId(c);
+  const { url, state } = await buildOrgScopedInstallUrl(organizationId);
   return c.json({ data: { url, state } });
 }
 
@@ -783,149 +758,64 @@ export async function githubInstallUrl(c: Context) {
  * install URL) to recover the SaaS userId that started the flow, then
  * use the App-JWT (which only the SaaS holds) to read the installation
  * details and write the gitInstallation row. NO OAuth identity required.
- *
- * This is the atomic install-attribution path. It replaces the previous
- * webhook-only attribution (which silently dropped installs when the
- * user hadn't already linked GitHub OAuth on the SaaS — the broken case).
- * The webhook is still useful for catching uninstalls / suspends, but
- * installs are now claimed here authoritatively.
- *
- * Configure the GitHub App's Setup URL to this endpoint:
- *   https://api.openship.io/api/cloud/github/install-callback
  */
 export async function githubInstallCallback(c: Context) {
-  const installationIdRaw = c.req.query("installation_id");
-  const setupAction = c.req.query("setup_action");
-  const state = c.req.query("state");
-
-  if (!installationIdRaw || !state) {
-    return c.html(
-      renderCallbackHtml(
-        "Missing parameters",
-        "GitHub redirect did not include the expected parameters. Try installing again from the dashboard.",
-      ),
-      400,
-    );
-  }
-
-  // peekAndConsumeInstallState verifies+burns the state without the
-  // userId-binding check that consumeInstallState does — the user's
-  // browser hits this endpoint anonymously after the github.com
-  // round-trip, so there's no session userId to compare against. The
-  // 16-byte random state IS the binding.
-  console.log(
-    `[github install-callback] hit installation_id=${installationIdRaw} setup_action=${setupAction} state=${state.slice(0, 8)}…`,
-  );
-  const stateRow = await peekAndConsumeInstallState(state);
-  if (!stateRow) {
-    console.log("[github install-callback] state not found or expired");
-    return c.html(
-      renderCallbackHtml(
-        "Install link expired",
-        "This installation link expired or was already used. Start a new install from the dashboard.",
-      ),
-      400,
-    );
-  }
-  const userId = stateRow.userId;
-  const installationId = Number(installationIdRaw);
-  if (!Number.isFinite(installationId)) {
-    return c.html(
-      renderCallbackHtml(
-        "Invalid installation",
-        `installation_id="${installationIdRaw}" is not a valid number.`,
-      ),
-      400,
-    );
-  }
-
-  // setup_action="request" means the user lacked admin perms on the org
-  // and submitted an approval request instead of installing directly.
-  // GitHub will fire installation.created later when the admin approves;
-  // at that point our webhook can take over (the org admin's userId may
-  // also be linked). No row to write yet.
-  if (setupAction === "request") {
-    return c.html(
-      renderCallbackHtml(
-        "Installation requested",
-        "An organization admin needs to approve the install. The Openship App will activate once approved.",
-      ),
-    );
-  }
-
-  try {
-    // App-JWT lookup — SaaS holds the GitHub App private key, so this
-    // works without any user OAuth token. Returns the installation's
-    // account (org or user the App was installed on).
-    const installation = await githubAuth.appFetch<{
-      id: number;
-      account: { login: string; id: number; avatar_url: string; type: string };
-    }>(`https://api.github.com/app/installations/${installationId}`);
-
-    // Resolve organizationId via the user's first membership; fall
-    // back to their personal org (`org_<userId>` — always provisioned).
-    // gitInstallation.organizationId is NOT NULL.
-    const memberships = await repos.member
-      .listByUser(userId)
-      .catch(() => [] as Array<{ organizationId: string }>);
-    const organizationId =
-      memberships[0]?.organizationId ?? `org_${userId}`;
-
-    await repos.gitInstallation.upsert({
-      userId,
-      organizationId,
-      provider: "github",
-      installationId,
-      owner: installation.account.login.toLowerCase(),
-      ownerType: installation.account.type,
-      // providerUserId is the GitHub user id of the installer; we don't
-      // have it here (GitHub doesn't include it on /app/installations/X
-      // — it's only in the webhook payload's `sender`). Leaving null;
-      // the webhook will fill it in on subsequent uninstall events.
-      providerUserId: undefined,
-      providerOwnerId: String(installation.account.id),
-      isOrg: installation.account.type === "Organization",
-    });
-
-    await repos.auditEvent
-      .create({
-        organizationId,
-        actorUserId: userId,
-        eventType: "github.install",
-        resourceType: "github",
-        resourceId: String(installationId),
-        ipAddress: c.var.clientIp,
-        userAgent: c.req.header("user-agent") ?? null,
-        before: null,
-        after: {
-          installationId,
-          owner: installation.account.login,
-          ownerType: installation.account.type,
-        },
-      })
-      .catch((err) =>
-        console.warn(
-          "[github install-callback] audit emit failed:",
-          safeErrorMessage(err),
+  const result = await attributeGithubInstall({
+    installationIdRaw: c.req.query("installation_id"),
+    setupAction: c.req.query("setup_action"),
+    state: c.req.query("state"),
+    clientIp: c.var.clientIp,
+    userAgent: c.req.header("user-agent") ?? null,
+  });
+  switch (result.kind) {
+    case "missing-params":
+      return c.html(
+        renderCallbackHtml(
+          "Missing parameters",
+          "GitHub redirect did not include the expected parameters. Try installing again from the dashboard.",
+        ),
+        400,
+      );
+    case "state-expired":
+      return c.html(
+        renderCallbackHtml(
+          "Install link expired",
+          "This installation link expired or was already used. Start a new install from the dashboard.",
+        ),
+        400,
+      );
+    case "invalid-installation-id":
+      return c.html(
+        renderCallbackHtml(
+          "Invalid installation",
+          `installation_id="${result.raw}" is not a valid number.`,
+        ),
+        400,
+      );
+    case "pending-approval":
+      return c.html(
+        renderCallbackHtml(
+          "Installation requested",
+          "An organization admin needs to approve the install. The Openship App will activate once approved.",
         ),
       );
-
-    return c.html(
-      renderCallbackHtml(
-        "GitHub App installed",
-        `${installation.account.login} is now connected. You can close this window — the dashboard will pick up the install on next refresh.`,
-        { closeAfterMs: 2500 },
-      ),
-    );
-  } catch (err) {
-    console.error("[github install-callback] failed:", err);
-    return c.html(
-      renderCallbackHtml(
-        "Install attribution failed",
-        `Could not finalize installation ${installationId}. Refresh the dashboard or try installing again. (${safeErrorMessage(err)})`,
-      ),
-      500,
-    );
+    case "ok":
+      return c.html(
+        renderCallbackHtml(
+          "GitHub App installed",
+          `${result.installation.account.login} is now connected. You can close this window — the dashboard will pick up the install on next refresh.`,
+          { closeAfterMs: 2500 },
+        ),
+      );
+    case "failed":
+      console.error("[github install-callback] failed:", result.error);
+      return c.html(
+        renderCallbackHtml(
+          "Install attribution failed",
+          `Could not finalize installation ${result.installationId}. Refresh the dashboard or try installing again. (${result.error})`,
+        ),
+        500,
+      );
   }
 }
 
@@ -977,16 +867,9 @@ function escapeHtml(s: string): string {
  * GitHub. Read-through to GitHub refreshes the DB cache.
  */
 export async function githubInstallations(c: Context) {
-  const { ownerUserId } = await resolveCloudOwner(c);
-  const installations = await githubAuth.getUserInstallations(ownerUserId);
-  return c.json({
-    data: installations.map((i) => ({
-      id: i.id,
-      login: i.account.login,
-      avatarUrl: i.account.avatar_url,
-      type: i.account.type,
-    })),
-  });
+  const organizationId = getActiveOrganizationId(c);
+  const installations = await listOrgInstallations(organizationId);
+  return c.json({ data: installations });
 }
 
 /**
@@ -999,52 +882,17 @@ export async function githubInstallations(c: Context) {
  * source code.
  *
  * SECURITY: `installationId` is intentionally NOT accepted from the
- * request body — a caller-supplied id is a privilege-escalation surface
- * (Bob could pass Alice's installation id and mint a token against her
- * GitHub App installation). The id is resolved server-side from
- * (ownerUserId, owner) via repos.gitInstallation.findByOwner. If the
- * org owner doesn't have an installation for `owner`, we return 404.
+ * request body — see service comments.
  */
 export async function githubInstallationToken(c: Context) {
-  const { ownerUserId } = await resolveCloudOwner(c);
-  const body = await c.req.json<{
-    owner?: string;
-    repos?: string[];
-  }>();
-  if (!body.owner) {
-    return c.json({ error: "owner is required" }, 400);
+  const organizationId = getActiveOrganizationId(c);
+  const body = await c.req.json<{ owner?: string; repos?: string[] }>();
+  if (!body.owner) return c.json({ error: "owner is required" }, 400);
+  const result = await mintOrgInstallationToken(organizationId, body.owner, body.repos);
+  if (result.kind === "not-found") {
+    return c.json({ error: `No GitHub App installation found for ${result.owner}` }, 404);
   }
-
-  // Resolve installationId from the ORG OWNER's row — the org's GitHub
-  // installations all live on the owner's account. Never trust the
-  // client-supplied installationId.
-  const installation = await repos.gitInstallation.findByOwner(ownerUserId, body.owner);
-  if (!installation) {
-    return c.json(
-      { error: `No GitHub App installation found for ${body.owner}` },
-      404,
-    );
-  }
-
-  const token = await githubAuth
-    .getInstallationToken(ownerUserId, body.owner, installation.installationId)
-    .catch(() => null);
-  if (!token) {
-    return c.json(
-      { error: `No GitHub App installation found for ${body.owner}` },
-      404,
-    );
-  }
-
-  // getInstallationToken caches the token for 50min; the returned
-  // expiresAt is approximate — clients should not rely on it being
-  // exact. The cloud-client refreshes ~5min before this.
-  return c.json({
-    data: {
-      token,
-      expiresAt: new Date(Date.now() + 55 * 60 * 1000).toISOString(),
-    },
-  });
+  return c.json({ data: { token: result.token, expiresAt: result.expiresAt } });
 }
 
 /**
@@ -1055,33 +903,10 @@ export async function githubInstallationToken(c: Context) {
  */
 export async function githubUserStatus(c: Context) {
   const userId = getUserId(c);
-  const status = await githubAuth.getUserStatus(userId);
-
-  // Diagnostic: when the SaaS reports the user as disconnected, log the
-  // resolved userId and whether a GitHub account row exists for it.
-  // This distinguishes "wrong-user/stale-cloud-session" (no row in DB,
-  // SaaS is talking to a different user than the one OAuth linked)
-  // from "row exists but token refresh failed" (token fetch null).
+  const status = await githubAuth.getUserStatusWithDiagnostics(userId);
   if (!status.connected) {
-    let githubRowCount = -1;
-    try {
-      const rows = await db
-        .select({ id: schema.account.id })
-        .from(schema.account)
-        .where(
-          and(
-            eq(schema.account.userId, userId),
-            eq(schema.account.providerId, "github"),
-          ),
-        );
-      githubRowCount = rows.length;
-    } catch (err) {
-      console.log(
-        `[cloud-saas:githubUserStatus] account lookup failed: ${safeErrorMessage(err)}`,
-      );
-    }
     console.log(
-      `[cloud-saas:githubUserStatus] connected=false userId=${userId} githubAccountRowsForUser=${githubRowCount}`,
+      `[cloud-saas:githubUserStatus] connected=false userId=${userId} githubAccountRowsForUser=${status.githubAccountRowsForUser}`,
     );
     return c.json({ data: { connected: false as const } });
   }
@@ -1094,4 +919,3 @@ export async function githubUserStatus(c: Context) {
     },
   });
 }
-

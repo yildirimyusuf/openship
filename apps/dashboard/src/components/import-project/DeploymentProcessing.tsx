@@ -20,7 +20,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import { useTheme } from "@/components/theme-provider";
 import { useModal } from "@/context/ModalContext";
 import { useToast } from "@/context/ToastContext";
-import { projectsApi } from "@/lib/api";
+import { ApiError, getApiErrorMessage, projectsApi } from "@/lib/api";
 import { DeletionModal } from "@/app/(dashboard)/projects/[id]/components/DeletionModal";
 
 interface DeploymentProcessingProps {
@@ -94,7 +94,21 @@ const DeploymentProcessing: React.FC<DeploymentProcessingProps> = ({ onRedeploy 
           setIsDeleting(false);
         }
       } catch (err) {
-        showToast(err instanceof Error ? err.message : "Failed to delete project", "error");
+        if (err instanceof ApiError && err.status === 409) {
+          const body = (err.body ?? {}) as {
+            failed?: Array<{ resource: string; reason: string }>;
+            message?: string;
+          };
+          const failed = body.failed ?? [];
+          console.error("[delete-project] cleanup failed", failed);
+          const summary =
+            failed.length > 0
+              ? `${failed.length} resource${failed.length === 1 ? "" : "s"} couldn't be cleaned up. Retry to attempt again.`
+              : body.message || "Some resources couldn't be cleaned up. Retry to attempt again.";
+          showToast(summary, "error", "Cleanup failed - some resources remain");
+        } else {
+          showToast(getApiErrorMessage(err, "Failed to delete project"), "error");
+        }
         setIsDeleting(false);
       }
     },

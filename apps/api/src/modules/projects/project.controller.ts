@@ -384,6 +384,33 @@ export async function remove(c: Context) {
     deleteApp,
     wipeVolumes,
   });
+
+  // Remote cleanup failed - local DB is intact, surface a 409 so the
+  // dashboard can show the failed-resource list and offer Retry.
+  if (!result.ok) {
+    audit.recordAsync(auditContextFrom(c, organizationId, userId), {
+      eventType: "project.deleted",
+      resourceType: "project",
+      resourceId: id,
+      after: {
+        deleteApp,
+        wipeVolumes,
+        ok: false,
+        failedCount: result.failed?.length ?? 0,
+      },
+    });
+    return c.json(
+      {
+        ok: false,
+        message: result.message,
+        failed: result.failed,
+        deletedApp: false,
+        deletedProjects: 0,
+      },
+      409,
+    );
+  }
+
   audit.recordAsync(auditContextFrom(c, organizationId, userId), {
     eventType: "project.deleted",
     resourceType: "project",
@@ -395,7 +422,12 @@ export async function remove(c: Context) {
       deletedProjects: result.deletedProjects,
     },
   });
-  return c.json({ message: "deleted", ...result });
+  return c.json({
+    message: "deleted",
+    ok: true,
+    deletedApp: result.deletedApp,
+    deletedProjects: result.deletedProjects,
+  });
 }
 
 export async function deletionPreview(c: Context) {

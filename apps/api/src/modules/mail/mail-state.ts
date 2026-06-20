@@ -87,6 +87,71 @@ export interface MailWebmailState {
   version: string;
 }
 
+/**
+ * Platform SMTP mailbox credential cache.
+ *
+ * Lives at `openship@<state.domain>` (the primary install). The
+ * doveadm-hashed password is stored in `vmail.mailbox`; the plaintext
+ * here is the canonical copy the API hands to nodemailer. Both ends are
+ * written in a SINGLE call to `ensureOpenshipPlatformMailbox` so drift is
+ * structurally impossible — see
+ * apps/api/src/modules/mail/admin/platform-mailbox.service.ts.
+ *
+ * Absence of the field on an existing state file = "not yet provisioned"
+ * (older install). The next call to sendTestEmail backfills via
+ * `ensureOpenshipPlatformMailbox(serverId)` before sending.
+ */
+export interface PlatformMailboxState {
+  /** `openship@<domain>` */
+  email: string;
+  /**
+   * Encrypted password blob (AES-256-GCM via lib/encryption.ts). Legacy
+   * installs may hold raw plaintext here; the ensure* path falls back to
+   * treating an undecryptable value as legacy plaintext and re-encrypts on
+   * next rotation. Same blast radius as `secrets.DOMAIN_ADMIN_PASSWD_PLAIN`:
+   * the state file is root-only on the mail VPS, never copied off-server.
+   */
+  password: string;
+  /** `mail.<state.domain>` — the DNS-resolvable submission host. */
+  smtpHost: string;
+  /** Always 465 (implicit TLS). Stored for forward-compatibility. */
+  smtpPort: number;
+  /** Always true. Stored for forward-compatibility. */
+  secure: boolean;
+  /** ISO timestamp of last rotation / first provision. */
+  updatedAt: string;
+}
+
+/**
+ * Per-domain test mailbox credential cache.
+ *
+ * Same shape as `PlatformMailboxState` — the only difference is scope:
+ * one entry per provisioned domain (`openship@<domain>` for each domain
+ * in `vmail.domain`), keyed by the domain in `MailServerState.testMailboxes`.
+ * Used by the admin "send test mail" flow when the operator wants to
+ * verify deliverability from a specific domain rather than from the
+ * primary install identity.
+ *
+ * The `smtpHost` field still resolves to `mail.<state.domain>` (the
+ * single submission host all domains share) — this struct stores it
+ * verbatim so the slow-path mint can re-emit identical creds across runs
+ * without re-reading `state.domain`.
+ */
+export interface TestMailboxState {
+  /** `openship@<domain>` for this entry's domain key. */
+  email: string;
+  /** Encrypted password blob — see PlatformMailboxState.password. */
+  password: string;
+  /** `mail.<state.domain>`. */
+  smtpHost: string;
+  /** Always 465 (implicit TLS). */
+  smtpPort: number;
+  /** Always true. */
+  secure: boolean;
+  /** ISO timestamp of last rotation / first provision. */
+  updatedAt: string;
+}
+
 export interface MailStepResult {
   stepId: number;
   success: boolean;
@@ -221,6 +286,22 @@ export interface MailServerState {
    * operator confirms.
    */
   additionalDomains?: Record<string, AdditionalDomainDns>;
+  /**
+   * Platform SMTP mailbox credentials (`openship@<state.domain>`). Set by
+   * `ensureOpenshipPlatformMailbox` on first run (typically from the
+   * post-install hook). Absent on legacy installs that pre-date the
+   * primitive — call sites must backfill via ensure* before reading.
+   */
+  platformMailbox?: PlatformMailboxState;
+  /**
+   * Per-domain test mailbox credentials, keyed by the domain (e.g.
+   * `"oblien.com" -> { email: "openship@oblien.com", … }`). Set by
+   * `ensureOpenshipTestMailbox(serverId, domain)` on first run for a
+   * given domain. Kept as a separate top-level field from
+   * `platformMailbox` so read-back compatibility for the singular
+   * platform credential is preserved; the two stores never alias.
+   */
+  testMailboxes?: Record<string, TestMailboxState>;
 }
 
 // ─── I/O ─────────────────────────────────────────────────────────────────────

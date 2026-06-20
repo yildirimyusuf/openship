@@ -12,7 +12,13 @@ import {
 import { Cloud, ExternalLink, X, Rocket, Shield, Globe, Zap, Loader2 } from "lucide-react";
 import { cloudApi } from "@/lib/api";
 import { getApiOrigin } from "@/lib/api/urls";
-import { getCloudConnectHandoffUrl } from "@/lib/cloud-auth";
+import {
+  getCloudConnectHandoffUrl,
+  generatePkceVerifier,
+  computePkceChallenge,
+  generateConnectFlowId,
+  CONNECT_PKCE_STORAGE_PREFIX,
+} from "@/lib/cloud-auth";
 import { canUseCloudConnection, usePlatform } from "@/context/PlatformContext";
 import { Button } from "@/components/ui/button";
 import { openAuthWindow } from "@/utils/authWindow";
@@ -145,7 +151,29 @@ export function CloudProvider({ children }: { children: ReactNode }) {
   // would let (auth)/layout.tsx silently drop the callback param when
   // the SaaS already has a session.
   const callbackUrl = `${getApiOrigin(typeof window !== "undefined" ? window.location.origin : undefined)}/api/cloud/connect-callback`;
-  const connectUrl = getCloudConnectHandoffUrl(callbackUrl);
+
+  /** Build the connect handoff URL with a fresh PKCE binding.
+   *  Stashes the verifier in localStorage keyed by the flow id (which is
+   *  also passed as `state` so the connect-callback popup script can find
+   *  it after the round trip). localStorage rather than sessionStorage
+   *  because the popup runs in a separate window — sessionStorage is
+   *  per-tab/window. */
+  const prepareConnectUrl = useCallback(async (): Promise<string> => {
+    const flowId = generateConnectFlowId();
+    const verifier = generatePkceVerifier();
+    const challenge = await computePkceChallenge(verifier);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(CONNECT_PKCE_STORAGE_PREFIX + flowId, verifier);
+      } catch {
+        /* localStorage disabled — fall back to non-PKCE flow */
+      }
+    }
+    return getCloudConnectHandoffUrl(callbackUrl, {
+      state: flowId,
+      codeChallenge: challenge,
+    });
+  }, [callbackUrl]);
 
   /** Desktop IPC connect flow with PKCE + nonce polling */
   const startDesktopConnect = useCallback(async () => {
@@ -199,10 +227,15 @@ export function CloudProvider({ children }: { children: ReactNode }) {
 
   /** Browser popup connect flow */
   const startBrowserConnect = useCallback(() => {
+    // Open the popup synchronously from the click handler (about:blank)
+    // so browsers don't block it, then navigate it once the async PKCE
+    // setup resolves.
     const handle = openAuthWindow();
-    handle.navigate(connectUrl);
+    prepareConnectUrl()
+      .then((url) => handle.navigate(url))
+      .catch(() => handle.close());
     handle.onClose(() => checkStatus());
-  }, [connectUrl, checkStatus]);
+  }, [prepareConnectUrl, checkStatus]);
 
   /** Start cloud connect - auto-detects desktop vs browser */
   const startConnect = useCallback(() => {

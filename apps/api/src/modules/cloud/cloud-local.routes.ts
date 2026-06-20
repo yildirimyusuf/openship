@@ -15,6 +15,7 @@ const r = secureRouter(cloudLocalRoutes, {
 // owner role only. A cloud:admin grant alone isn't enough.
 r.post("/disconnect", { tag: "cloud:admin" }, requireRole("owner"), local.disconnect);
 r.get("/connect-callback", { tag: "cloud:read" }, requireRole("owner"), local.connectCallback);
+r.post("/connect-finalize", { tag: "cloud:admin" }, requireRole("owner"), local.connectFinalize);
 r.get("/status", { tag: "cloud:read" }, local.status);
 
 r.get("/workspaces", { tag: "cloud:read" }, local.listWorkspaces);

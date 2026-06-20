@@ -3,7 +3,7 @@ import {
   buildSetupPayload,
 } from "@repo/onboarding";
 import { api, getApiBaseUrl } from "@/lib/api";
-import { buildDesktopAuthorizeUrl, startDesktopCloudAuth } from "@/lib/cloud-auth";
+import { buildDesktopAuthorizeUrl, preparePkceFlow, startDesktopCloudAuth } from "@/lib/cloud-auth";
 import type { OnboardingState } from "@repo/onboarding";
 
 export type LoadingStatus = {
@@ -15,10 +15,13 @@ export type LoadingResult =
   | { ok: true }
   | { ok: false; status: LoadingStatus };
 
-function getCloudLoginUrl(cloudAuthUrl?: string) {
+async function getCloudLoginUrl(cloudAuthUrl?: string) {
   const apiBase = getApiBaseUrl().replace(/\/$/, "");
   const callbackUrl = `${apiBase}/auth/cloud-callback`;
-  return buildDesktopAuthorizeUrl({ cloudAuthUrl, callbackUrl });
+  // Mint + stash a fresh PKCE verifier so the cloud-callback endpoint
+  // can finish a PKCE exchange instead of accepting a bearer code.
+  const { state, codeChallenge } = await preparePkceFlow();
+  return buildDesktopAuthorizeUrl({ cloudAuthUrl, callbackUrl, state, codeChallenge });
 }
 
 async function runDesktopCloudAuth(
@@ -65,7 +68,8 @@ async function runCloudFlow(
     title: "Redirecting to Openship Cloud\u2026",
     message: "You\u2019ll complete sign-in in a new tab",
   });
-  window.open(getCloudLoginUrl(cloudAuthUrl), "_blank");
+  const cloudLoginUrl = await getCloudLoginUrl(cloudAuthUrl);
+  window.open(cloudLoginUrl, "_blank");
   return { ok: true };
 }
 

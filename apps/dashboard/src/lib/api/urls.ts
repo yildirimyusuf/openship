@@ -40,6 +40,38 @@ function cloudPartner(target: Target): Target {
   return TARGETS.find((t) => t.id === target.cloudTargetId) ?? target;
 }
 
+// ─── Same-host proxy mode ───────────────────────────────────────────────────
+//
+// When `NEXT_PUBLIC_API_PROXY=true`, the dashboard rewrites every API URL
+// to land on its own origin under `/api/proxy/*`. The Next.js catch-all
+// at app/api/proxy/[...path]/route.ts forwards those requests to the
+// internal API process (configured via INTERNAL_API_URL on the server).
+//
+// Why: single-container self-hosted deploys want ONE public port. The
+// dashboard is the only thing exposed; the internal API binds to loopback
+// and is invisible to teammates. Same-origin requests also mean zero CORS
+// config, which simplifies the deploy.
+//
+// Both env vars are intentionally string-literal `"true"` rather than
+// runtime-bool. NEXT_PUBLIC_* values are inlined at build time, so we
+// compare strings to stay deterministic across SSR + client bundles.
+
+const API_PROXY_ENABLED =
+  typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_PROXY === "true";
+
+/**
+ * Resolve the same-origin URL when in proxy mode, or null when off.
+ * `null` lets callers fall through to the direct-target behavior.
+ */
+function sameOriginProxyOrigin(): string | null {
+  if (!API_PROXY_ENABLED) return null;
+  if (typeof window !== "undefined") return window.location.origin;
+  // SSR: read OPENSHIP_PUBLIC_URL or fall back to a reasonable default.
+  // The proxy is dashboard-served, so we use the dashboard's public URL.
+  const ssrOrigin = process.env.OPENSHIP_PUBLIC_URL ?? process.env.NEXT_PUBLIC_PUBLIC_URL;
+  return ssrOrigin ?? null;
+}
+
 // ─── Public exports ─────────────────────────────────────────────────────────
 
 export function getRequestOriginFromHeaders(headers: Pick<Headers, "get">) {
@@ -52,14 +84,29 @@ export function getRequestOriginFromHeaders(headers: Pick<Headers, "get">) {
 }
 
 export function getApiOrigin(rawUrl?: string) {
+  // In proxy mode every API call is same-origin — the "origin" of the
+  // API IS the dashboard's origin. Caller-provided `rawUrl` still wins
+  // (e.g. cloud-side lookups), but the default-no-arg case is rewritten.
+  if (!rawUrl) {
+    const proxied = sameOriginProxyOrigin();
+    if (proxied) return proxied;
+  }
   return currentTarget(rawUrl).api;
 }
 
 export function getAuthBaseUrl() {
+  if (API_PROXY_ENABLED) {
+    const origin = sameOriginProxyOrigin();
+    if (origin) return `${origin}/api/proxy/api/auth`;
+  }
   return `${getApiOrigin()}/api/auth`;
 }
 
 export function getRestApiBaseUrl() {
+  if (API_PROXY_ENABLED) {
+    const origin = sameOriginProxyOrigin();
+    if (origin) return `${origin}/api/proxy/api`;
+  }
   return `${getApiOrigin()}/api`;
 }
 

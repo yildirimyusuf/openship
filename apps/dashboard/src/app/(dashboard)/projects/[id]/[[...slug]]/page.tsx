@@ -31,7 +31,7 @@ import { useProjectInfo } from "@/hooks/useProjectEndpoints";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useToast } from "@/context/ToastContext";
-import { projectsApi } from "@/lib/api";
+import { ApiError, getApiErrorMessage, projectsApi } from "@/lib/api";
 import ErrorState from "@/components/shared/ErrorState";
 import { PageContainer } from "@/components/ui/PageContainer";
 import DropdownMenu, { type MenuAction } from "@/components/ui/DropdownMenu";
@@ -461,14 +461,38 @@ const ProjectSettingsContent = () => {
     // Optimistic - immediately show "Deleting" status
     setProjectData((prev: any) => ({ ...prev, deletedAt: new Date().toISOString() }));
 
-    const response = await projectsApi.delete(projectData.id, { deleteApp, wipeVolumes });
-    if (response.success) {
-      showToast(deleteApp ? "Project deleted successfully" : "Environment deleted successfully", "success");
-      router.push("/");
-    } else {
-      // Revert on failure
+    try {
+      const response = await projectsApi.delete(projectData.id, { deleteApp, wipeVolumes });
+      // Non-2xx now throws ApiError below; this branch is the 2xx happy path.
+      if (response.success) {
+        showToast(deleteApp ? "Project deleted successfully" : "Environment deleted successfully", "success");
+        router.push("/");
+        return;
+      }
+      // Defensive: 2xx with success=false (rare). Treat as failure.
       setProjectData((prev: any) => ({ ...prev, deletedAt: null }));
-      showToast(response.message || response.error, "error", "Failed to delete project");
+      showToast(response.message || response.error || "Failed to delete project", "error", "Failed to delete project");
+    } catch (err) {
+      // Always revert optimistic deletion on any failure - project still exists.
+      setProjectData((prev: any) => ({ ...prev, deletedAt: null }));
+
+      if (err instanceof ApiError && err.status === 409) {
+        const body = (err.body ?? {}) as {
+          failed?: Array<{ resource: string; reason: string }>;
+          message?: string;
+        };
+        const failed = body.failed ?? [];
+        // Log the structured payload - toast string will be visually truncated.
+        console.error("[delete-project] cleanup failed", failed);
+        const summary =
+          failed.length > 0
+            ? `${failed.length} resource${failed.length === 1 ? "" : "s"} couldn't be cleaned up. Retry to attempt again.`
+            : body.message || "Some resources couldn't be cleaned up. Retry to attempt again.";
+        showToast(summary, "error", "Cleanup failed - some resources remain");
+        return;
+      }
+
+      showToast(getApiErrorMessage(err, "Failed to delete project"), "error", "Failed to delete project");
     }
   };
 

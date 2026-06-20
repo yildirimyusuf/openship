@@ -473,17 +473,6 @@ export const mailApi = {
       resolutionId,
     }),
 
-  /**
-   * Branding - proxied to the Zero webmail server. Reads come back as
-   * `{ branding }` so the response shape matches PATCH; the consumer
-   * always sees `.branding`.
-   */
-  getBranding: (serverId: string) =>
-    api.get<{ branding: Branding }>(endpoints.mail.branding(serverId)),
-
-  updateBranding: (serverId: string, patch: Partial<Branding>) =>
-    api.patch<{ branding: Branding }>(endpoints.mail.branding(serverId), patch),
-
   // ── Webmail deploy ────────────────────────────────────────────────────────
   webmail: {
     /** Hosts the webmail can be deployed to (mail server + other openship servers). */
@@ -516,13 +505,3 @@ export const mailApi = {
   },
 };
 
-// ─── Branding ────────────────────────────────────────────────────────────────
-
-export interface Branding {
-  siteTitle: string;
-  siteDescription: string;
-  loginHeading: string;
-  loginSubtext: string;
-  loginFooter: string;
-  homeHtml: string | null;
-}

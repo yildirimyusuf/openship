@@ -16,6 +16,15 @@ export type Session = {
   updatedAt: string;
   ipAddress?: string;
   userAgent?: string;
+  /**
+   * The org the user is currently scoped to. The session.create.before
+   * hook in apps/api/src/lib/auth.ts defaults this to the user's
+   * deterministic personal org (`org_${userId}`) and Better Auth's
+   * setActive endpoint updates it when the user explicitly chooses.
+   * Optional in the type because some legacy / edge-case session rows
+   * may not carry it through to the response shape.
+   */
+  activeOrganizationId?: string | null;
 };
 
 export type User = {
@@ -78,6 +87,21 @@ export type DeploymentInfo = {
   cloudAuthUrl: string;
   machineName?: string;
   hostDomain?: string;
+  /**
+   * Multi-user migration state. When non-default, the dashboard
+   * should render a launcher screen pointing at migrationTargetUrl
+   * instead of the normal UI — this instance no longer owns the
+   * data and the operator should use the migrated URL.
+   */
+  teamMode?: "single_user" | "self_hosted_remote" | "cloud_hosted" | "tunneled";
+  migrationTargetUrl?: string | null;
+  /**
+   * True while a migration is mid-flight. The dashboard must render
+   * the in-progress launcher (not the normal UI, not the migrated
+   * launcher) — the source DB is being cut over and any write would
+   * 503. Flips back to false once the cutover finishes.
+   */
+  migrationInProgress?: boolean;
 };
 
 let _deploymentInfo: DeploymentInfo | null = null;
@@ -91,8 +115,26 @@ let _deploymentInfoFetchedAt = 0;
  */
 const DEPLOYMENT_INFO_TTL = process.env.NODE_ENV === "production" ? 30_000 : 2_000;
 
-export async function getDeploymentInfo(): Promise<DeploymentInfo> {
-  if (_deploymentInfo && Date.now() - _deploymentInfoFetchedAt < DEPLOYMENT_INFO_TTL) {
+export interface GetDeploymentInfoOptions {
+  /**
+   * Bypass the module-level cache and re-fetch from the API. Required
+   * for any caller that gates UI on `migrationInProgress` — the
+   * migration lock can flip true→false (or false→true) faster than the
+   * 30s TTL, and a stale cached value will route the operator to the
+   * wrong screen during the cutover window. The dashboard layout uses
+   * this; everywhere else the cache is fine.
+   */
+  skipCache?: boolean;
+}
+
+export async function getDeploymentInfo(
+  options: GetDeploymentInfoOptions = {},
+): Promise<DeploymentInfo> {
+  if (
+    !options.skipCache &&
+    _deploymentInfo &&
+    Date.now() - _deploymentInfoFetchedAt < DEPLOYMENT_INFO_TTL
+  ) {
     return _deploymentInfo;
   }
 

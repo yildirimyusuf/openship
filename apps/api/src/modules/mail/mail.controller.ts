@@ -819,6 +819,41 @@ export async function startSetup(c: Context) {
         );
       }
 
+      // Best-effort: provision the platform SMTP mailbox the API uses to send
+      // transactional mail (welcome emails, alerts, future user-invite sends).
+      // Same try/catch shape as markInstalled — a hiccup here must not poison
+      // the wizard's terminal success state; the operator (or the first
+      // sendTestEmail call) will trigger ensureOpenshipPlatformMailbox again
+      // later via its on-demand backfill path.
+      //
+      // Dynamic import mirrors the pattern domains.service.ts uses to dodge a
+      // load-time cycle (mail-state ↔ mail.controller ↔ admin services).
+      try {
+        const { ensureOpenshipPlatformMailbox } = await import(
+          "./admin/platform-mailbox.service"
+        );
+        const creds = await ensureOpenshipPlatformMailbox(serverId);
+        await stream.writeSSE({
+          event: "log",
+          data: JSON.stringify({
+            level: "info",
+            message: `Provisioned platform mailbox ${creds.email} (smtp ${creds.smtpHost}:${creds.smtpPort}).`,
+          }),
+        });
+      } catch (err) {
+        console.warn(
+          `[mail.install] ensureOpenshipPlatformMailbox failed for ${serverId}:`,
+          err,
+        );
+        await stream.writeSSE({
+          event: "log",
+          data: JSON.stringify({
+            level: "warn",
+            message: `Platform mailbox provisioning failed (non-fatal): ${safeErrorMessage(err)}. Retry from the Admin → Mailboxes panel.`,
+          }),
+        });
+      }
+
       await stream.writeSSE({
         event: "complete",
         data: JSON.stringify({

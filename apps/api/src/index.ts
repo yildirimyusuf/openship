@@ -4,6 +4,7 @@ import { cloudRuntimeTarget, cloudRuntimeTargetId, env, runtimeTargetId } from "
 import { getAuthMode } from "./lib/auth-mode";
 import { getJobRunner } from "./lib/job-runner";
 import { enforceRouteScanAtBoot } from "./lib/route-scanner";
+import { attachTunnelingLifecycle, type TunnelingLifecycle } from "./modules/tunneling";
 
 const port = env.PORT;
 
@@ -38,6 +39,16 @@ void (async () => {
   console.error("!!! Loopback-only guard is in authMiddleware.");
   console.error("");
 })();
+
+// Attach the tunnel agent lifecycle if this instance has been migrated
+// via Path C (teamMode === "tunneled"). Local-API-only by design —
+// CLOUD_MODE returns a no-op handle without touching state. Lives after
+// `serve` so the local HTTP listener is bound before we publish the
+// public URL via the broker.
+let tunneling: TunnelingLifecycle = { stop: () => {}, attached: false };
+void attachTunnelingLifecycle().then((handle) => {
+  tunneling = handle;
+});
 
 // WebSocket support is needed for:
 //   - interactive server terminal (self-hosted only)
@@ -77,6 +88,16 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     process.exit(1);
   }, 30_000);
   deadline.unref();
+
+  // Close the tunnel agent BEFORE the HTTP server so in-flight
+  // dashboard requests routed through the broker stop arriving while
+  // the local listener is still up to drain whatever's mid-flight.
+  // No-op on CLOUD_MODE (the attached handle is the frozen no-op).
+  try {
+    tunneling.stop();
+  } catch (err) {
+    console.warn("[shutdown] tunnel close failed:", err);
+  }
 
   try {
     const runner = await getJobRunner();

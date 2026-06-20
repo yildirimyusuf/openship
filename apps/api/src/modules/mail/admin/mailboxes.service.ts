@@ -39,6 +39,10 @@ import {
   STORAGE_NODE,
 } from "./maildir";
 import { recountDomain, validateDomain } from "./domains.service";
+import {
+  buildInsertMailboxSql,
+  buildInsertSelfForwardingSql,
+} from "./platform-mailbox.service";
 import { safeErrorMessage } from "@repo/core";
 
 const EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
@@ -174,7 +178,7 @@ export async function createMailbox(
         storagenode: layout.storagenode,
         maildir: layout.maildir,
       }),
-      buildSelfForwardingSql(username, input.domain.toLowerCase()),
+      buildInsertSelfForwardingSql(username, input.domain.toLowerCase()),
     ]);
 
     // 2. Create Maildir on disk. If this throws, roll back the DB rows so
@@ -347,71 +351,6 @@ export async function hardDeleteMailbox(
     }
     await recountDomain(serverId, existing.domain);
   });
-}
-
-// ─── SQL builders ────────────────────────────────────────────────────────────
-
-interface InsertMailboxFields {
-  username: string;
-  passwordHash: string;
-  name: string;
-  domain: string;
-  quotaMB: number;
-  storagebasedirectory: string;
-  storagenode: string;
-  maildir: string;
-}
-
-function buildInsertMailboxSql(f: InsertMailboxFields): string {
-  // Every `enable*` flag is 1. iRedMail's default install enables IMAP/SMTP/
-  // POP3 + secured variants for every mailbox; we mirror that. Operators can
-  // disable a mailbox entirely via the `active` flag (UpdateMailboxInput).
-  //
-  // The three hyphenated flag columns must be quoted as "enable-lib-storage"
-  // etc. in DDL but iRedMail names them with underscores in actual SQL -
-  // we use the iRedMail convention here (no quoting) because that's how the
-  // installed schema actually exists.
-  return `INSERT INTO mailbox (
-      username, password, name, domain, quota,
-      storagebasedirectory, storagenode, maildir,
-      mailboxformat, mailboxfolder,
-      enablesmtp, enablesmtpsecured,
-      enableimap, enableimapsecured, enableimaptls,
-      enablepop3, enablepop3secured, enablepop3tls,
-      enabledeliver, enablelda, enablelmtp,
-      enablemanagesieve, enablemanagesievesecured,
-      enablesieve, enablesievesecured, enablesievetls,
-      enableinternal, enabledoveadm, enabledsync, enablesogo,
-      active, created, modified, passwordlastchange
-    ) VALUES (
-      ${q(f.username)},
-      ${q(f.passwordHash)},
-      ${q(f.name)},
-      ${q(f.domain)},
-      ${qInt(f.quotaMB)},
-      ${q(f.storagebasedirectory)},
-      ${q(f.storagenode)},
-      ${q(f.maildir)},
-      'maildir', 'Maildir',
-      1, 1,
-      1, 1, 1,
-      1, 1, 1,
-      1, 1, 1,
-      1, 1,
-      1, 1, 1,
-      1, 1, 1, 1,
-      1, NOW(), NOW(), NOW()
-    )`;
-}
-
-function buildSelfForwardingSql(username: string, domain: string): string {
-  return `INSERT INTO forwardings (
-      address, forwarding, domain, dest_domain,
-      is_maillist, is_list, is_forwarding, is_alias, active
-    ) VALUES (
-      ${q(username)}, ${q(username)}, ${q(domain)}, ${q(domain)},
-      0, 0, 1, 0, 1
-    )`;
 }
 
 // ─── Typed errors ────────────────────────────────────────────────────────────

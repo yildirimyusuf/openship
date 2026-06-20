@@ -4,6 +4,20 @@ export { db, getDriver, type Database, type Driver } from "./client";
 // ─── Schema (table definitions) ──────────────────────────────────────────────
 export * as schema from "./schema";
 
+// ─── Dump / restore (team-mode migration + project transfer) ─────────────────
+export {
+  dumpSubgraph,
+  restoreSubgraph,
+  dumpDatabase,
+  restoreDatabase,
+  DUMP_FORMAT_VERSION,
+  PkCollisionError,
+  type DatabaseDump,
+  type DumpOptions,
+  type RestoreOptions,
+  type SubgraphScope,
+} from "./dump";
+
 // ─── Repositories (all DB access goes through here) ──────────────────────────
 export {
   repos,

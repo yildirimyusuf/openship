@@ -39,6 +39,23 @@ import type {
 } from "../types";
 import { PassThrough, Writable } from "node:stream";
 
+/**
+ * Detect "not found" errors from the Docker SDK (dockerode). The daemon
+ * returns HTTP 404 for missing containers/images/volumes/networks; dockerode
+ * surfaces this as an Error with `.statusCode === 404` (and a message
+ * containing "no such container/image/..."). Used to make destroy /
+ * removeImage idempotent across partial-cleanup retries.
+ */
+function isDockerNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { statusCode?: number; reason?: string; message?: string };
+  if (e.statusCode === 404) return true;
+  if (typeof e.message === "string" && /no such (container|image|volume|network)/i.test(e.message)) {
+    return true;
+  }
+  return false;
+}
+
 /** Clamp a terminal window dimension to a sane min/max with default. */
 function clampShellWindow(
   value: number | undefined,
@@ -846,12 +863,26 @@ export class DockerRuntime implements RuntimeAdapter {
 
   async removeImage(imageRef: string): Promise<void> {
     const image = this.docker.getImage(imageRef);
-    await image.remove({ force: true });
+    try {
+      await image.remove({ force: true });
+    } catch (err) {
+      // Idempotent: swallow "not found" / 404 so partial-cleanup retries
+      // don't re-fail on already-deleted images. Re-throw anything else
+      // (permission denied, image in use by other tags, daemon down, ...).
+      if (!isDockerNotFoundError(err)) throw err;
+    }
   }
 
   async destroy(containerId: string): Promise<void> {
     const container = this.docker.getContainer(containerId);
-    await container.remove({ force: true });
+    try {
+      await container.remove({ force: true });
+    } catch (err) {
+      // Idempotent: swallow "no such container" / 404 so partial-cleanup
+      // retries don't re-fail on already-deleted containers. Re-throw
+      // anything else (permission denied, daemon down, dependent state).
+      if (!isDockerNotFoundError(err)) throw err;
+    }
   }
 
   // ── Rollback primitives ──────────────────────────────────────────────

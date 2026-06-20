@@ -6,6 +6,7 @@ import { handleApiError } from "./middleware/error-handler";
 import { rateLimiter } from "./middleware/rate-limiter";
 import { clientIpMiddleware } from "./middleware/client-ip";
 import { betterAuthShield } from "./middleware/better-auth-shield";
+import { migrationGuard } from "./middleware/migration-guard";
 import { initPlatform } from "@repo/adapters";
 import { resolvePlatformConfig } from "./lib/controller-helpers";
 
@@ -51,6 +52,7 @@ app.use(
 );
 app.use("*", logger());
 app.use("*", clientIpMiddleware);
+app.use("*", migrationGuard);
 
 // Primary error path: Hono's compose() catches thrown errors at each
 // dispatch level and routes them to `this.errorHandler`, NOT up through

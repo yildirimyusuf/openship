@@ -278,6 +278,21 @@ export interface PermissionSpec {
    * controller.
    */
   skipAuth?: boolean;
+  /**
+   * Route operates on the collection rather than a specific resource:
+   * org scope comes from the request (X-Organization-Id header or
+   * session default), no :id is required. Use for create/bulk
+   * endpoints whose action is write/admin (e.g. POST /deployments,
+   * POST /deployments/prepare, POST /projects, POST /projects/scan).
+   *
+   * For action=list this is already the default behaviour — do NOT
+   * set `collection: true` on list routes.
+   *
+   * The safety property of the :id requirement is preserved on every
+   * per-resource route that doesn't opt in: forgetting to add the
+   * flag is a 400, not a silent fall-through to org-singleton scope.
+   */
+  collection?: boolean;
 }
 
 export interface PublicSpec {
@@ -337,6 +352,19 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
         resourceType: parsed.leaf,
         resourceId: "*",
         action: parsed.action as Action,
+      });
+      leafId = "*";
+    } else if (spec.collection) {
+      // Collection-scoped write/admin (e.g. POST /deployments, POST
+      // /deployments/prepare). No :id in the URL; org scope comes from
+      // the request (X-Organization-Id header or session default).
+      // Same resolution path as list reads, just with the route's
+      // declared action so role/grants still apply.
+      await permission.assert(c, {
+        resourceType: parsed.leaf,
+        resourceId: "*",
+        action: parsed.action as Action,
+        scope: "list",
       });
       leafId = "*";
     } else {

@@ -158,7 +158,17 @@ export async function createDomain(
   // Dynamic import: mailboxes.service imports `recountDomain` from us,
   // so a static reverse-import would form a load-time cycle. Same
   // pattern used in `deleteDomain` below.
+  // Track the postmaster-creation outcome separately from `dnsWarning` so
+  // the operator gets a precise message instead of a generic 535 at
+  // welcome-send time. If postmaster creation failed AND a postmaster
+  // mailbox already exists in vmail.mailbox from a prior attempt (with
+  // an unknown hash), the test-email flow would later authenticate with
+  // a plaintext we never saved against a hash we never set - surface
+  // that as a fatal/visible warning here so the operator can rotate the
+  // password (or delete and re-add the domain) before they hit the
+  // welcome modal.
   let postmasterPassword: string | undefined;
+  let postmasterWarning: string | undefined;
   try {
     postmasterPassword = genSecret(18);
     const { createMailbox } = await import("./mailboxes.service");
@@ -169,10 +179,15 @@ export async function createDomain(
       name: "Postmaster",
     });
   } catch (err) {
+    const message = safeErrorMessage(err);
     console.warn(
-      `createDomain: postmaster mailbox creation failed for ${domain}: ${safeErrorMessage(err)}`,
+      `createDomain: postmaster mailbox creation failed for ${domain}: ${message}`,
     );
     postmasterPassword = undefined;
+    postmasterWarning =
+      `Postmaster mailbox auto-creation failed for ${domain} (${message}). ` +
+      `Test-send AS ${domain} will not work until you create or rotate ` +
+      `postmaster@${domain} from the Mailboxes tab.`;
   }
 
   let dnsWarning: string | undefined;
@@ -241,7 +256,12 @@ export async function createDomain(
 
   const row = await getDomain(serverId, domain);
   if (!row) throw new Error(`createDomain: row not found after INSERT for ${domain}`);
-  return { row, dnsWarning };
+  // Merge the postmaster-creation warning into the dnsWarning so the
+  // operator sees both classes of issue at the same surface (the toast /
+  // banner that follows domain add) rather than discovering the auth
+  // problem later via a 535 at welcome-send time.
+  const finalWarning = [dnsWarning, postmasterWarning].filter(Boolean).join(" ");
+  return { row, dnsWarning: finalWarning || undefined };
 }
 
 export async function updateDomain(

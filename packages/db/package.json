@@ -29,6 +29,8 @@
     "db:heal-pglite": "bun scripts/heal-pglite.ts",
     "db:heal-pglite-resetwal": "bun scripts/heal-pglite-resetwal.ts",
     "db:heal-orphans": "bun scripts/heal-orphan-tables.ts",
+    "db:dump": "bun scripts/dump.ts",
+    "db:restore": "bun scripts/restore.ts",
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {

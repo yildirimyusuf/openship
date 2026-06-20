@@ -14,7 +14,13 @@ import { randomUUID } from "node:crypto";
 import { repos } from "@repo/db";
 import { provisionUser } from "./provision-user";
 
-const LOCAL_EMAIL = "local@openship.local";
+export const LOCAL_EMAIL = "local@openship.local";
+
+/** Reset the in-process cache. Use after mutating the local user row
+ *  (e.g. the zero-auth → local-auth upgrade flow renames the user). */
+export function invalidateLocalUserCache(): void {
+  cached = null;
+}
 
 export interface LocalUser {
   id: string;
@@ -33,6 +39,11 @@ export async function ensureLocalUser(): Promise<LocalUser> {
   const existing = await repos.user.findByEmail(LOCAL_EMAIL);
   const id = existing?.id ?? randomUUID();
 
+  // provisionUser is idempotent: it upserts the user row AND the
+  // personal organization (`org_${id}`) AND the owner-role member
+  // binding, all in a single transaction. After this returns, the
+  // zero-auth synthetic user shows up in the Team Members tab as
+  // owner of `${name}'s workspace` — no separate insertion needed.
   await provisionUser({
     id,
     name: "Local User",

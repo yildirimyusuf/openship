@@ -34,6 +34,15 @@ export type { ImageCatalogEntry, ListImagesResponse } from "./images";
 export { aiApi } from "./ai";
 export { sandboxApi } from "./sandbox";
 export { systemApi } from "./system";
+export { migrationApi } from "./migration";
+export type {
+  DomainChoice,
+  PreflightResult,
+  StartServerResult,
+  StartCloudResult,
+  StartTunnelResult,
+  SwitchBackResult,
+} from "./migration";
 export { settingsApi } from "./settings";
 export type {
   BuildMode,
@@ -83,7 +92,6 @@ export type {
   MailComponentStatus,
   MailComponentDef,
   MailHealthResponse,
-  Branding,
   WebmailTargetOption,
 } from "./mail";
 

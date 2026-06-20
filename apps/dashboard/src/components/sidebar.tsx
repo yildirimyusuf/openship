@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   FolderKanban,
@@ -21,14 +21,52 @@ import {
   Server,
   Mail,
   DatabaseBackup,
+  Building2,
+  ChevronsUpDown,
+  Check,
 } from "lucide-react";
-import { signOut } from "@/lib/auth-client";
+import { authClient, signOut } from "@/lib/auth-client";
 import { useTheme } from "@/components/theme-provider";
 import { useI18n } from "@/components/i18n-provider";
 import { Logo } from "@/components/logo";
 import { useAuth } from "@/context/AuthContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
+import { DismissiblePopover } from "@/components/ui/Popover";
+import { setActiveOrganizationId } from "@/lib/api/client";
+
+/**
+ * Org list / member shapes from Better Auth's organization plugin.
+ * Mirrors the inline types used in account-switcher.tsx and TeamTab.tsx.
+ */
+interface SidebarOrg {
+  id: string;
+  name: string;
+  slug?: string | null;
+  logo?: string | null;
+}
+
+interface SidebarMember {
+  id: string;
+  userId: string;
+  role: string;
+}
+
+/**
+ * Module-level singleton — Better Auth's React client wraps the
+ * organization plugin in a Proxy whose property accesses return a fresh
+ * reference, so capturing it inside the component body and using it as a
+ * useEffect dep creates an infinite render loop. See TeamTab for the
+ * full explanation.
+ */
+const sidebarOrgClient = (authClient as unknown as {
+  organization: {
+    list: () => Promise<{ data?: SidebarOrg[] }>;
+    setActive: (opts: { organizationId: string }) => Promise<{ error?: { message?: string } }>;
+    getFullOrganization: () => Promise<{ data?: { id: string } | null }>;
+    listMembers: () => Promise<{ data?: { members?: SidebarMember[] } }>;
+  };
+}).organization;
 
 interface NavItem {
   key: string;
@@ -80,13 +118,31 @@ export function Sidebar() {
   const { connected: cloudConnected, cloudUser } = useCloud();
   const isDesktop = deployMode === "desktop";
 
-  // On desktop, show cloud identity when connected, machine name when local
-  const displayName = isDesktop
-    ? (cloudConnected ? (cloudUser?.name || "Openship Cloud") : (machineName || "Local User"))
-    : (user?.name || user?.email?.split("@")[0] || "");
-  const displayEmail = isDesktop
-    ? (cloudConnected ? (cloudUser?.email || "Cloud connected") : "Desktop")
-    : user?.email;
+  // The primary identity in the sidebar header is ALWAYS the local Better
+  // Auth user (the "who am I on this self-hosted instance" - the operator-
+  // of-record whose org, team, audit log, and permissions every other
+  // surface in the dashboard is scoped to). A cloud connection is a
+  // CREDENTIAL the local user HOLDS (used to mint namespace tokens, proxy
+  // GitHub App, etc.) - not an identity replacement.
+  //
+  // The external SaaS profile (cloudUser.name / cloudUser.email) belongs in
+  // Settings -> CloudConnection where it lives as a "Linked to Openship
+  // Cloud as <email>" card. We surface it here only as a small secondary
+  // hint line under the local identity when a cloud session is active, so
+  // the operator can see WHICH external account is linked without ever
+  // having the local user's name swapped out from under them.
+  //
+  // Fallback for the zero-auth desktop case (Electron build where no
+  // Better Auth user exists yet, e.g. fresh install before onboarding):
+  // fall back to machineName, NEVER to the cloud profile.
+  const displayName =
+    user?.name ||
+    user?.email?.split("@")[0] ||
+    (isDesktop ? (machineName || "Local User") : "");
+  const displayEmail =
+    user?.email ||
+    (isDesktop ? "Desktop" : "");
+  const cloudBadge = cloudConnected ? cloudUser : null;
   const displayInitial = displayName?.[0] ?? displayEmail?.[0] ?? "?";
   const isSaaS = !selfHosted || cloudConnected;
   const navSections = getNavSections(isSaaS, selfHosted);
@@ -96,6 +152,75 @@ export function Sidebar() {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+
+  // Org switcher state. Lazy-loaded — `list()` and the active org fetch
+  // only fire after the first popover open so the sidebar doesn't pay
+  // for the round-trip on every page load. The role chip for the active
+  // org is fetched alongside.
+  const [orgsOpen, setOrgsOpen] = useState(false);
+  const [orgs, setOrgs] = useState<SidebarOrg[]>([]);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
+  const [activeOrgRole, setActiveOrgRole] = useState<string | null>(null);
+  const [orgsLoaded, setOrgsLoaded] = useState(false);
+  const [switchingOrgId, setSwitchingOrgId] = useState<string | null>(null);
+
+  // Fetch on mount so the trigger shows the current org name without
+  // waiting for the user to click. Cheap (one /list call) and mirrors
+  // the AccountSwitcher pattern.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [listRes, activeRes] = await Promise.all([
+          sidebarOrgClient.list(),
+          sidebarOrgClient.getFullOrganization().catch(() => ({ data: null })),
+        ]);
+        if (cancelled) return;
+        const list = listRes.data ?? [];
+        setOrgs(list);
+        const aid = (activeRes.data as { id: string } | null)?.id ?? null;
+        setActiveOrgId(aid);
+        setActiveOrganizationId(aid);
+        setOrgsLoaded(true);
+        // Best-effort role lookup for the active org's "current user"
+        // membership. Failures (e.g. desktop / no-org modes) just leave
+        // the role chip off.
+        try {
+          const mRes = await sidebarOrgClient.listMembers();
+          if (cancelled) return;
+          const me = mRes.data?.members?.find((m) => m.userId === user?.id);
+          setActiveOrgRole(me?.role ?? null);
+        } catch {
+          /* role chip optional */
+        }
+      } catch {
+        /* org switcher hidden when fetch fails */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  async function handleOrgSwitch(orgId: string) {
+    if (orgId === activeOrgId) {
+      setOrgsOpen(false);
+      return;
+    }
+    setSwitchingOrgId(orgId);
+    try {
+      const res = await sidebarOrgClient.setActive({ organizationId: orgId });
+      if (res.error) {
+        setSwitchingOrgId(null);
+        return;
+      }
+      setActiveOrganizationId(orgId);
+      // Reload so every list endpoint re-fetches under the new scope.
+      window.location.reload();
+    } catch {
+      setSwitchingOrgId(null);
+    }
+  }
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -111,6 +236,10 @@ export function Sidebar() {
       setLoggingOut(false);
     }
   }
+
+  const activeOrg =
+    orgs.find((o) => o.id === activeOrgId) ?? orgs[0] ?? null;
+  const showOrgSwitcher = orgsLoaded && !!activeOrg;
 
   const isActive = (href: string) =>
     href === "/"
@@ -220,7 +349,7 @@ export function Sidebar() {
         </Link>
       </div>
 
-      {/* ── Account ──────────────────────────────────────────── */}
+      {/* ── Account / Org switcher ──────────────────────────── */}
       <div className="px-3 pb-4 pt-1">
         <div className="mx-2 mb-3 h-px bg-border/60" />
         {!collapsed && (
@@ -228,31 +357,202 @@ export function Sidebar() {
             {t.dashboard.nav.sections.account}
           </p>
         )}
-        <div
-          className={`flex items-center rounded-xl px-2 py-2 ${
-            collapsed ? "justify-center" : "gap-3"
-          }`}
-        >
-          {/* Avatar */}
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground/[0.08] text-sm font-semibold uppercase text-foreground">
-            {displayInitial}
-          </div>
 
-          {!collapsed && (
-            <>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[14px] font-medium leading-tight text-foreground">
-                  {displayName}
-                </p>
-                <p className="truncate text-[12px] leading-tight text-muted-foreground">
-                  {displayEmail}
-                </p>
+        {showOrgSwitcher ? (
+          <DismissiblePopover
+            open={orgsOpen}
+            onOpenChange={setOrgsOpen}
+            className="relative"
+          >
+            {/* Trigger — current org + chevron, Cloudflare-style */}
+            <button
+              type="button"
+              onClick={() => setOrgsOpen((v) => !v)}
+              className={`group flex w-full items-center rounded-xl px-2 py-2 text-left transition-colors hover:bg-foreground/[0.06] ${
+                collapsed ? "justify-center" : "gap-3"
+              }`}
+              aria-haspopup="dialog"
+              aria-expanded={orgsOpen}
+              title={collapsed ? activeOrg?.name : undefined}
+            >
+              {/* Org avatar / initial */}
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground/[0.08] text-sm font-semibold uppercase text-foreground">
+                {activeOrg?.name?.[0] ?? <Building2 className="size-4" />}
               </div>
+
+              {!collapsed && (
+                <>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[14px] font-semibold leading-tight text-foreground">
+                      {activeOrg?.name ?? "Workspace"}
+                    </p>
+                    <p className="truncate text-[12px] leading-tight text-muted-foreground">
+                      {orgs.length > 1
+                        ? `${orgs.length} workspaces`
+                        : displayEmail}
+                    </p>
+                  </div>
+                  <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" />
+                </>
+              )}
+            </button>
+
+            {/* Popover — shown to the side when collapsed, above when expanded */}
+            {orgsOpen && (
+              <div
+                className={`absolute z-50 overflow-hidden rounded-2xl border border-border/50 bg-card shadow-xl shadow-black/[0.08] ${
+                  collapsed
+                    ? "left-full bottom-0 ml-2 w-72"
+                    : "left-0 right-0 bottom-full mb-2"
+                }`}
+              >
+                {/* Heading */}
+                <div className="px-3 pt-3 pb-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+                    Switch organization
+                  </p>
+                </div>
+
+                {/* Org list */}
+                <div className="max-h-64 overflow-y-auto pb-1">
+                  {orgs.map((o) => {
+                    const isCurrent = o.id === activeOrgId;
+                    const isSwitching = switchingOrgId === o.id;
+                    return (
+                      <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => handleOrgSwitch(o.id)}
+                        disabled={!!switchingOrgId}
+                        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-foreground/[0.05] disabled:opacity-60 ${
+                          isCurrent ? "bg-foreground/[0.03]" : ""
+                        }`}
+                      >
+                        <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground/[0.08] text-[12px] font-semibold uppercase text-foreground">
+                          {o.name?.[0] ?? <Building2 className="size-3.5" />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] font-medium leading-tight text-foreground">
+                            {o.name}
+                          </p>
+                          {isCurrent && (
+                            <p className="mt-0.5 truncate text-[11px] leading-tight text-muted-foreground">
+                              <span className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-medium uppercase tracking-wide text-[10px] text-muted-foreground">
+                                Current
+                              </span>
+                              {activeOrgRole && (
+                                <span className="ml-1.5 capitalize text-muted-foreground/80">
+                                  {activeOrgRole}
+                                </span>
+                              )}
+                            </p>
+                          )}
+                        </div>
+                        {isCurrent && !isSwitching && (
+                          <Check className="size-4 shrink-0 text-primary" />
+                        )}
+                        {isSwitching && (
+                          <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Footer separator + signed-in-as + sign out */}
+                <div className="border-t border-border/40 px-2 py-2">
+                  <div className="flex items-center gap-2.5 rounded-xl px-2 py-1.5">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-foreground/[0.08] text-[11px] font-semibold uppercase text-foreground">
+                      {displayInitial}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12px] font-medium leading-tight text-foreground">
+                        {displayName}
+                      </p>
+                      <p className="truncate text-[11px] leading-tight text-muted-foreground">
+                        {displayEmail}
+                      </p>
+                      {cloudBadge?.email && (
+                        <p
+                          className="truncate text-[10px] leading-tight text-muted-foreground/70"
+                          title={`Linked to Openship Cloud as ${cloudBadge.email}`}
+                        >
+                          Cloud: {cloudBadge.email}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    disabled={loggingOut}
+                    className="mt-1 flex w-full items-center gap-2 rounded-xl px-2 py-2 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+                  >
+                    {loggingOut ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <LogOut className="size-4" />
+                    )}
+                    {isDesktop ? "Back to setup" : t.dashboard.user.logout}
+                  </button>
+                </div>
+              </div>
+            )}
+          </DismissiblePopover>
+        ) : (
+          /* Fallback: no org context (desktop / pre-org-bootstrap / fetch
+             failure). Keep the original avatar + email + sign-out row so
+             the operator can still log out. */
+          <>
+            <div
+              className={`flex items-center rounded-xl px-2 py-2 ${
+                collapsed ? "justify-center" : "gap-3"
+              }`}
+            >
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground/[0.08] text-sm font-semibold uppercase text-foreground">
+                {displayInitial}
+              </div>
+
+              {!collapsed && (
+                <>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[14px] font-medium leading-tight text-foreground">
+                      {displayName}
+                    </p>
+                    <p className="truncate text-[12px] leading-tight text-muted-foreground">
+                      {displayEmail}
+                    </p>
+                    {cloudBadge?.email && (
+                      <p
+                        className="truncate text-[11px] leading-tight text-muted-foreground/70"
+                        title={`Linked to Openship Cloud as ${cloudBadge.email}`}
+                      >
+                        Cloud: {cloudBadge.email}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleLogout}
+                    disabled={loggingOut}
+                    className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+                    aria-label={isDesktop ? "Back to setup" : t.dashboard.user.logout}
+                    title={isDesktop ? "Back to setup" : t.dashboard.user.logout}
+                  >
+                    {loggingOut ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <LogOut className="size-4" />
+                    )}
+                  </button>
+                </>
+              )}
+            </div>
+
+            {collapsed && (
               <button
                 onClick={handleLogout}
                 disabled={loggingOut}
-                className="flex size-8 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
-                aria-label={isDesktop ? "Back to setup" : t.dashboard.user.logout}
+                className="mt-2 flex w-full items-center justify-center rounded-xl py-2.5 text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
                 title={isDesktop ? "Back to setup" : t.dashboard.user.logout}
               >
                 {loggingOut ? (
@@ -261,12 +561,14 @@ export function Sidebar() {
                   <LogOut className="size-4" />
                 )}
               </button>
-            </>
-          )}
-        </div>
+            )}
+          </>
+        )}
 
-        {/* Collapsed: logout button below avatar */}
-        {collapsed && (
+        {/* Collapsed: surface logout when switcher is shown but popover
+            closed, so users without a pointer-friendly path still have a
+            shortcut. The switcher itself handles the trigger spot. */}
+        {collapsed && showOrgSwitcher && !orgsOpen && (
           <button
             onClick={handleLogout}
             disabled={loggingOut}

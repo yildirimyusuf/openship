@@ -477,8 +477,46 @@ export interface DeleteProjectOptions {
   wipeVolumes?: boolean;
 }
 
+export interface DeleteProjectFailure {
+  projectId: string;
+  resource: string;
+  reason: string;
+}
+
+export interface DeleteProjectResult {
+  ok: boolean;
+  deletedApp: boolean;
+  deletedProjects: number;
+  /** Populated only when ok=false — every remote step that failed during
+   *  cleanup. The local DB rows are preserved when this is non-empty so
+   *  the caller can retry without orphaning cloud resources. */
+  failed?: DeleteProjectFailure[];
+  /** Human-readable summary when ok=false. */
+  message?: string;
+}
+
 /**
- * Full project/environment deletion: validate → soft-delete → background cleanup.
+ * Full project/environment deletion: validate → REMOTE cleanup first → DB delete.
+ *
+ * Ordering invariant: we must NOT delete the local project row until every
+ * remote resource (Oblien workspaces / pages / edge proxies, Docker
+ * containers, routes, volumes, networks) is gone. If we lose the local row
+ * first and a remote step fails, the user has no way to retry the cleanup
+ * — the project is invisible in the dashboard while the cloud resources
+ * keep billing/serving. So the order here is intentionally:
+ *
+ *   1. collect resource manifests (must run before DB teardown anyway — the
+ *      manifest needs domain/deployment rows still in place)
+ *   2. run remote cleanup (executeCleanup + webmail teardown) per project
+ *      and wait for it
+ *   3. ONLY if every remote step succeeded: soft-delete project rows, drop
+ *      domains, soft-delete project_app, hard-delete deployments + services
+ *   4. on any remote failure: return { ok: false, failed: [...] } and leave
+ *      local DB intact so the user can retry
+ *
+ * Within step 2, sub-steps still fan out via Promise.allSettled — parallel
+ * where independent, sequential where dependent (executeCleanup already
+ * orders containers→images→routes→volumes→networks via TYPE_ORDER).
  *
  * In the current product model, a DB project is one environment and project_app
  * is the app users think of as "the project". deleteApp=true removes all sibling
@@ -488,7 +526,7 @@ export async function deleteProject(
   projectId: string,
   organizationId: string,
   options: DeleteProjectOptions = {},
-): Promise<{ deletedApp: boolean; deletedProjects: number }> {
+): Promise<DeleteProjectResult> {
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
 
@@ -501,10 +539,10 @@ export async function deleteProject(
       )
     : [p];
 
-  // 1. Collect resource manifests BEFORE we tear down DB state - the manifest
-  //    needs to inspect domain/deployment rows that the next step removes.
-  //    Volume enumeration also has to run here: once the container is gone,
-  //    its mount metadata is gone too.
+  // 1. Collect resource manifests BEFORE any teardown - the manifest needs
+  //    to inspect domain/deployment rows AND container mount metadata that
+  //    later steps remove. Volume enumeration also has to run here: once
+  //    the container is gone, its mount metadata is gone too.
   const manifests = await Promise.all(
     projects.map(async (project) => ({
       project,
@@ -512,12 +550,66 @@ export async function deleteProject(
     })),
   );
 
-  // 2. Soft-delete environments immediately, and hard-delete domain rows so
-  //    the managed-slug "registry" is freed right away. Without this, an
-  //    immediate redeploy hits an orphan row and falsely reports the slug
-  //    as taken before the async cleanup below has a chance to run.
-  await Promise.all(projects.map((project) => repos.project.softDelete(project.id)));
+  // 2. Run remote cleanup for every project FIRST and wait for completion.
+  //    Each cleanup is parallel via Promise.allSettled so a single project's
+  //    failure doesn't block siblings; sub-steps inside each cleanup are
+  //    already bounded-concurrency + retry via executeCleanup.
+  const cleanupSettled = await Promise.allSettled(
+    manifests.map(({ project, manifest }) => cleanupProjectResources(manifest, project)),
+  );
+
+  // Aggregate failures into a flat list the controller can surface.
+  const failed: DeleteProjectFailure[] = [];
+  for (let i = 0; i < cleanupSettled.length; i++) {
+    const settled = cleanupSettled[i];
+    const project = manifests[i].project;
+    if (settled.status === "rejected") {
+      // The cleanup helper itself threw (catastrophic). Wrap as one entry.
+      failed.push({
+        projectId: project.id,
+        resource: "(cleanup driver)",
+        reason: safeErrorMessage(settled.reason),
+      });
+      continue;
+    }
+    for (const f of settled.value.failed) {
+      failed.push({
+        projectId: project.id,
+        resource: f.label,
+        reason: f.error,
+      });
+    }
+  }
+
+  // 3. If any remote step failed, ABORT before touching local DB. The
+  //    project is still resolvable, the dashboard still shows it, and the
+  //    user can retry to drain whatever stragglers remain. This is the
+  //    critical safety property: a partial cloud teardown must never
+  //    orphan-on-local-delete.
+  if (failed.length > 0) {
+    const total = cleanupSettled.reduce(
+      (n, s) => n + (s.status === "fulfilled" ? s.value.total : 1),
+      0,
+    );
+    const failedCount = failed.length;
+    console.error(
+      `[PROJECT] Aborting DB delete for ${projectId}: ${failedCount}/${total} remote cleanup steps failed`,
+    );
+    return {
+      ok: false,
+      deletedApp: false,
+      deletedProjects: 0,
+      failed,
+      message: `${failedCount}/${total} remote cleanup steps failed. Local project preserved. Retry to attempt again.`,
+    };
+  }
+
+  // 4. Remote cleanup succeeded everywhere - now safe to drop local rows.
+  //    Soft-delete environments and hard-delete domain rows so the managed-
+  //    slug "registry" is freed. Order matters: domains first so an
+  //    immediate redeploy doesn't trip over an orphan row.
   await Promise.all(projects.map((project) => repos.domain.deleteByProjectId(project.id)));
+  await Promise.all(projects.map((project) => repos.project.softDelete(project.id)));
 
   let deletedApp = deleteApp;
   if (deleteApp) {
@@ -530,24 +622,40 @@ export async function deleteProject(
     }
   }
 
-  // 3. Background cleanup (fire-and-forget) using the manifests we captured.
-  for (const { project, manifest } of manifests) {
-    cleanupProjectResources(manifest, project).catch((err) =>
-      console.error(`[PROJECT] Background cleanup failed for ${project.id}:`, err),
-    );
-  }
+  // 5. Hard-delete dependent rows. Project soft-delete only sets `deletedAt`
+  //    and FK cascades only fire on hard-delete, so service rows survive
+  //    otherwise. Order matters: deployments first (their FK cascades remove
+  //    serviceDeployment rows), then services (no FK dependents left).
+  await Promise.all(
+    projects.map((project) => repos.deployment.deleteByProjectId(project.id)),
+  );
+  await Promise.all(
+    projects.map((project) => repos.service.deleteByProjectId(project.id)),
+  );
 
-  return { deletedApp, deletedProjects: projects.length };
+  return { ok: true, deletedApp, deletedProjects: projects.length };
 }
 
-/** Internal: runs after soft-delete, outside the request lifecycle. */
+/**
+ * Internal: drive remote cleanup for a single project. Returns the cleanup
+ * result so deleteProject() can decide whether to proceed with DB teardown.
+ *
+ * Layers:
+ *   1. executeCleanup(manifest) — containers/images/routes/volumes/networks
+ *      via runtime + routing adapters (bounded concurrency, single retry).
+ *      On cloud, destroying the workspace also frees the Oblien-side route;
+ *      on self-hosted, removeRoute clears the local nginx config.
+ *   2. webmail-specific teardown — branding dir + mail-state block, which
+ *      live outside the generic resource manifest.
+ *
+ * Throws only on catastrophic failures (e.g. the manifest itself is
+ * malformed); per-resource failures are reported in the returned
+ * CleanupResult and the caller decides what to do.
+ */
 async function cleanupProjectResources(
   manifest: CleanupManifest,
   project: Project,
-): Promise<void> {
-  // 1. Destroy resources with bounded concurrency (containers, images, routes).
-  //    On cloud, destroying the workspace also frees the Oblien-side route;
-  //    on self-hosted, removeRoute clears the local nginx config.
+): Promise<CleanupResult> {
   const result = await executeCleanup(manifest);
   if (result.failed.length > 0) {
     console.error(
@@ -557,25 +665,26 @@ async function cleanupProjectResources(
     );
   }
 
-  // 2. Framework-specific teardown that's not in the generic manifest.
-  //    Webmail keeps a branding dir outside the workspace and a block in the
-  //    mail-state file; both have to be wiped explicitly so a future re-deploy
-  //    starts fresh.
-  if (project.framework === "webmail") {
+  // Webmail keeps a branding dir outside the workspace and a block in the
+  // mail-state file; both have to be wiped explicitly so a future re-deploy
+  // starts fresh. Only run when the generic resource cleanup succeeded —
+  // otherwise we'd wipe the branding while the route still serves traffic.
+  if (project.framework === "webmail" && result.failed.length === 0) {
     const mailServerId = mailServerIdFromWebmailSlug(project.slug);
     if (mailServerId) {
-      await cleanupWebmailInstall({ mailServerId });
+      try {
+        await cleanupWebmailInstall({ mailServerId });
+      } catch (err) {
+        result.failed.push({
+          ref: mailServerId,
+          label: `webmail teardown ${project.slug}`,
+          error: safeErrorMessage(err),
+        });
+      }
     }
   }
 
-  // 3. DB cleanup (hard-delete deployments + build sessions + services).
-  //    Project soft-delete only sets `deletedAt` and the FK cascades only
-  //    fire on hard-delete, so service rows survive otherwise. Without this
-  //    call those rows would sit forever as zombies under a deleted project.
-  //    Order matters: deployments first (their FK cascades remove
-  //    serviceDeployment rows), then services (no FK dependents left).
-  await repos.deployment.deleteByProjectId(project.id);
-  await repos.service.deleteByProjectId(project.id);
+  return result;
 }
 
 

@@ -19,6 +19,7 @@ import {
   buildAuthPageHref,
   buildDesktopAuthorizeUrl,
   getPostAuthRedirect,
+  preparePkceFlow,
   startDesktopCloudAuth,
 } from "@/lib/cloud-auth";
 
@@ -74,8 +75,17 @@ function LoginPageInner() {
     }
   }
 
-  async function handleCloudSignIn(cloudLoginUrl: string) {
+  async function handleCloudSignIn(callbackUrl: string) {
     if (!isDesktop || !window.desktop?.onboarding) {
+      // Mint + stash a fresh PKCE verifier so cloud-callback can finish
+      // a PKCE exchange instead of accepting a bearer code.
+      const { state, codeChallenge } = await preparePkceFlow();
+      const cloudLoginUrl = buildDesktopAuthorizeUrl({
+        cloudAuthUrl,
+        callbackUrl,
+        state,
+        codeChallenge,
+      });
       window.location.href = cloudLoginUrl;
       return;
     }
@@ -115,7 +125,9 @@ function LoginPageInner() {
   if (authMode === "cloud") {
     const apiUrl = getApiOrigin(typeof window !== "undefined" ? window.location.origin : undefined);
     const callbackUrl = `${apiUrl}/api/auth/cloud-callback`;
-    const cloudLoginUrl = buildDesktopAuthorizeUrl({ cloudAuthUrl, callbackUrl });
+    // The actual cloud-authorize URL is built inside handleCloudSignIn so
+    // PKCE state can be minted + stashed in localStorage just before the
+    // redirect (must happen in a click handler, not render).
 
     return (
       <AuthShell onBack={handleBack}>
@@ -142,7 +154,7 @@ function LoginPageInner() {
           className="w-full"
           size="lg"
           disabled={loading}
-          onClick={() => { void handleCloudSignIn(cloudLoginUrl); }}
+          onClick={() => { void handleCloudSignIn(callbackUrl); }}
         >
           {loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <ExternalLink className="mr-2 size-4" />}
           {loading ? "Opening Openship Cloud..." : "Sign in with Openship"}

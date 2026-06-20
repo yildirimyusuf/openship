@@ -51,6 +51,13 @@ healthRoutes.get("/env", async (c) => {
   //   "cloud"  → external auth on Openship Cloud
   //   "local"  → local Better Auth (self-hosted server / SaaS)
   let authMode: string;
+  // teamMode tells the dashboard whether this instance has been
+  // migrated to a multi-user deployment. When non-default, the
+  // dashboard renders a launcher pointing at migrationTargetUrl
+  // instead of the normal UI.
+  let teamMode: string = "single_user";
+  let migrationTargetUrl: string | null = null;
+  let migrationInProgress: boolean = false;
 
   if (env.DEPLOY_MODE === "desktop") {
     // Desktop: authMode is set during onboarding (none or cloud)
@@ -58,17 +65,32 @@ healthRoutes.get("/env", async (c) => {
       const { repos } = await import("@repo/db");
       const settings = await repos.instanceSettings.get();
       authMode = settings?.authMode ?? "none";
+      teamMode = settings?.teamMode ?? "single_user";
+      migrationTargetUrl = settings?.migrationTargetUrl ?? null;
+      migrationInProgress = settings?.migrationInProgress ?? false;
     } catch {
       authMode = "none";
     }
   } else {
     authMode = "local";
+    try {
+      const { repos } = await import("@repo/db");
+      const settings = await repos.instanceSettings.get();
+      teamMode = settings?.teamMode ?? "single_user";
+      migrationTargetUrl = settings?.migrationTargetUrl ?? null;
+      migrationInProgress = settings?.migrationInProgress ?? false;
+    } catch {
+      // settings table may be unavailable mid-migration; defaults are safe.
+    }
   }
 
   return c.json({
     selfHosted: !env.CLOUD_MODE,
     deployMode: env.DEPLOY_MODE,
     authMode,
+    teamMode,
+    migrationTargetUrl,
+    migrationInProgress,
     cloudAuthUrl: cloudRuntimeTarget.dashboard,
     ...(machineName && { machineName }),
     ...(env.HOST_DOMAIN && { hostDomain: env.HOST_DOMAIN }),

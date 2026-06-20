@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { localOnly } from "../../middleware";
 import { secureRouter } from "../../lib/secure-router";
 import * as ctrl from "./project.controller";
+import * as transfer from "./transfer.controller";
 
 const r = secureRouter(new Hono(), {
   module: "projects",
@@ -23,14 +24,18 @@ const r = secureRouter(new Hono(), {
 
 /* ─── Local-only routes (hidden in cloud mode) ─────────────────────────── */
 r.get("/local", { tag: "project:list" }, localOnly, ctrl.listLocal);
-r.post("/scan", { tag: "project:write" }, localOnly, ctrl.scanLocal);
-r.post("/import", { tag: "project:write" }, localOnly, ctrl.importLocal);
+// Collection-scoped writes: org from request (X-Organization-Id or
+// session default); no :id in the URL — the controller resolves the
+// project from the JSON body. `collection: true` keeps the existing
+// :id-required default safe for per-resource routes below.
+r.post("/scan", { tag: "project:write", collection: true }, localOnly, ctrl.scanLocal);
+r.post("/import", { tag: "project:write", collection: true }, localOnly, ctrl.importLocal);
 
 /* ─── Top-level project operations ─────────────────────────────────────── */
 r.get("/home", { tag: "project:list" }, ctrl.getHome);
-r.post("/ensure", { tag: "project:write" }, ctrl.ensure);
+r.post("/ensure", { tag: "project:write", collection: true }, ctrl.ensure);
 r.get("/", { tag: "project:list" }, ctrl.list);
-r.post("/", { tag: "project:write" }, ctrl.create);
+r.post("/", { tag: "project:write", collection: true }, ctrl.create);
 
 /* ─── Projects CRUD ────────────────────────────────────────────────────── */
 r.get("/:id", { tag: "project:read" }, ctrl.getById);
@@ -87,5 +92,9 @@ r.get("/:id/logs/stream", { tag: "project:read" }, ctrl.runtimeLogStream);
 r.get("/:id/server-logs/recent", { tag: "project:read" }, ctrl.recentServerLogs);
 r.get("/:id/server-logs/stream-token", { tag: "project:read" }, ctrl.serverLogStreamToken);
 r.get("/:id/server-logs/stream", { tag: "project:read" }, ctrl.serverLogStream);
+
+/* ─── Project transfer (local <-> cloud) ───────────────────────────────── */
+r.post("/:id/transfer/to-cloud", { tag: "project:admin" }, transfer.transferToCloud);
+r.post("/:id/transfer/to-self-hosted", { tag: "project:admin" }, transfer.transferToSelfHosted);
 
 export const projectRoutes = r.hono;
