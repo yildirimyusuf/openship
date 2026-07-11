@@ -30,6 +30,7 @@
 import { repos } from "@repo/db";
 import { AppError } from "@repo/core";
 import type { RequestContext } from "../../lib/request-context";
+import { grantSourceFor, isScoped } from "../../lib/grant-source";
 
 /** What the caller wants to do, mapped onto grant permissions. */
 export type GitHubAccessOp = "list" | "read" | "write";
@@ -88,17 +89,15 @@ export async function canUseGitHubRepo(
   op: GitHubAccessOp,
 ): Promise<boolean> {
   const organizationId = ctx.organizationId || undefined;
-  if (!organizationId) return true;
+  if (!organizationId) return !isScoped(ctx);
 
   try {
     const member = await repos.member.find(organizationId, ctx.userId);
     if (!member) return false;
-    if (GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return true;
+    // A scoped token never gets owner auto-access — it's limited to its grants.
+    if (!isScoped(ctx) && GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return true;
 
-    const grants = await repos.resourceGrant.listByMember(
-      organizationId,
-      ctx.userId,
-    );
+    const grants = await grantSourceFor(ctx).listByMember(organizationId, ctx.userId);
 
     const ownerLc = target.owner.toLowerCase();
     const repoKey = target.repo ? `${ownerLc}/${target.repo.toLowerCase()}` : null;
@@ -176,17 +175,14 @@ export async function filterAllowedRepos<T>(
   keyOf: (item: T) => { owner: string; repo: string },
 ): Promise<T[]> {
   const organizationId = ctx.organizationId || undefined;
-  if (!organizationId) return list;
+  if (!organizationId) return isScoped(ctx) ? [] : list;
 
   try {
     const member = await repos.member.find(organizationId, ctx.userId);
     if (!member) return [];
-    if (GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return list;
+    if (!isScoped(ctx) && GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return list;
 
-    const grants = await repos.resourceGrant.listByMember(
-      organizationId,
-      ctx.userId,
-    );
+    const grants = await grantSourceFor(ctx).listByMember(organizationId, ctx.userId);
     if (grants.length === 0) return [];
 
     // All-GitHub grant short-circuits to full visibility.
@@ -230,17 +226,14 @@ export async function filterAllowedAccounts<T>(
   loginOf: (item: T) => string,
 ): Promise<T[]> {
   const organizationId = ctx.organizationId || undefined;
-  if (!organizationId) return accounts;
+  if (!organizationId) return isScoped(ctx) ? [] : accounts;
 
   try {
     const member = await repos.member.find(organizationId, ctx.userId);
     if (!member) return [];
-    if (GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return accounts;
+    if (!isScoped(ctx) && GITHUB_AUTO_ACCESS_ROLES.has(member.role ?? "member")) return accounts;
 
-    const grants = await repos.resourceGrant.listByMember(
-      organizationId,
-      ctx.userId,
-    );
+    const grants = await grantSourceFor(ctx).listByMember(organizationId, ctx.userId);
     if (grants.length === 0) return [];
     if (grants.some((g) => g.resourceType === GH_ALL && permits(g.permissions, "list"))) {
       return accounts;

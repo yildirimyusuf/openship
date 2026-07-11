@@ -11,7 +11,7 @@
  *   - team      → organization members + invitations (moved from /members)
  *   - audit     → audit log feed (moved from /audit), admin+ only
  *   - cloud     → cloud connection (self-hosted only)
- *   - instance  → instance info
+ *   - instance  → instance info + data export/import (self-hosted, owner-gated)
  */
 
 import { Suspense, useEffect } from "react";
@@ -118,9 +118,14 @@ function SettingsPageInner() {
 
           {activeTab === "cloud" && selfHosted && <CloudConnection />}
 
-          {activeTab === "instance" && <InstanceInfo />}
-
-          {activeTab === "data" && selfHosted && <DataTransferTab />}
+          {activeTab === "instance" && (
+            <>
+              <InstanceInfo />
+              {/* Full-DB export/import lives here (owner-gated inside the
+                  component); self-hosted only — SaaS has no portable DB. */}
+              {selfHosted && <DataTransferTab />}
+            </>
+          )}
         </div>
 
         {/* ── NAV (right, sticky on desktop) ── */}

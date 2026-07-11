@@ -25,6 +25,13 @@ export const personalAccessToken = pgTable(
     tokenHash: text("token_hash").notNull().unique(),
     /** Read-only tokens reject mutation methods (POST/PUT/PATCH/DELETE). */
     readOnly: boolean("read_only").notNull().default(false),
+    /**
+     * When true the token carries its OWN resource grants
+     * (personal_access_token_grant) and is enforced as a restricted principal
+     * limited to exactly those — even below the owner's role. When false the
+     * token acts with the owning user's full role (legacy behavior).
+     */
+    scoped: boolean("scoped").notNull().default(false),
     expiresAt: timestamp("expires_at"),
     lastUsedAt: timestamp("last_used_at"),
     revokedAt: timestamp("revoked_at"),

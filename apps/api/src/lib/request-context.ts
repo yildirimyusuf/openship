@@ -38,6 +38,14 @@ export interface RequestContext {
   sessionId: string;
   sessionKind: SessionKind;
 
+  /**
+   * Present ONLY for a scoped personal access token. When set, the caller is a
+   * scoped-token principal: permission checks force `restricted` behavior and
+   * source grants from the token (personal_access_token_grant) instead of the
+   * user's member grants. Absent for sessions and unscoped tokens.
+   */
+  tokenScope?: { tokenId: string } | null;
+
   clientIp: string | null;
   userAgent: string | null;
 
@@ -80,6 +88,7 @@ export interface BuildRequestContextInput {
   membershipId: string;
   sessionId: string;
   sessionKind: SessionKind;
+  tokenScope?: { tokenId: string } | null;
   clientIp: string | null;
   userAgent: string | null;
   traceId: string;
@@ -95,6 +104,7 @@ export function buildRequestContext(input: BuildRequestContextInput): RequestCon
     membershipId: input.membershipId,
     sessionId: input.sessionId,
     sessionKind: input.sessionKind,
+    tokenScope: input.tokenScope ?? null,
     clientIp: input.clientIp,
     userAgent: input.userAgent,
     traceId: input.traceId,

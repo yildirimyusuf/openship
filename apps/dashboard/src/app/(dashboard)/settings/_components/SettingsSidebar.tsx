@@ -16,11 +16,11 @@
  */
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { Settings as SettingsIcon, Users, ClipboardList, Cloud, Server, Bell, KeyRound, Boxes, DatabaseBackup } from "lucide-react";
+import { Settings as SettingsIcon, Users, ClipboardList, Cloud, Server, Bell, KeyRound, Boxes } from "lucide-react";
 import { usePlatform } from "@/context/PlatformContext";
 import { useSession, authClient } from "@/lib/auth-client";
 
-export type SettingsTabId = "general" | "tokens" | "mcp" | "team" | "notifications" | "audit" | "cloud" | "instance" | "data";
+export type SettingsTabId = "general" | "tokens" | "mcp" | "team" | "notifications" | "audit" | "cloud" | "instance";
 
 export interface SettingsTab {
   id: SettingsTabId;
@@ -36,7 +36,7 @@ export function useSettingsTabs(): { tabs: SettingsTab[]; activeTab: SettingsTab
   const { selfHosted } = usePlatform();
   const searchParams = useSearchParams();
   const raw = (searchParams.get("tab") ?? "general") as SettingsTabId;
-  const allowedTabs: SettingsTabId[] = ["general", "tokens", "mcp", "team", "notifications", "audit", "cloud", "instance", "data"];
+  const allowedTabs: SettingsTabId[] = ["general", "tokens", "mcp", "team", "notifications", "audit", "cloud", "instance"];
   const activeTab: SettingsTabId = allowedTabs.includes(raw) ? raw : "general";
 
   const tabs: SettingsTab[] = [
@@ -48,8 +48,6 @@ export function useSettingsTabs(): { tabs: SettingsTab[]; activeTab: SettingsTab
     { id: "audit", label: "Audit log", icon: ClipboardList, visible: true, requiresRole: "admin" },
     { id: "cloud", label: "Cloud", icon: Cloud, visible: selfHosted },
     { id: "instance", label: "Instance", icon: Server, visible: true },
-    // Self-hosted only: full-DB export/import for migrating between installs.
-    { id: "data", label: "Data", icon: DatabaseBackup, visible: selfHosted, requiresRole: "owner" },
   ];
 
   return { tabs: tabs.filter((t) => t.visible), activeTab };

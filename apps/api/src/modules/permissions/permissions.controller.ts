@@ -242,11 +242,11 @@ export async function listResources(c: Context) {
       organizationId,
       label: "permissions:github-catalog",
     });
-    const home = await createGitHubSource(ownerCtx)
-      .then((s) => s.getHome())
-      .catch(() => ({ accounts: [], repos: [] }));
+    const source = await createGitHubSource(ownerCtx).catch(() => null);
+    if (!source) return c.json({ data: [] });
 
     if (type === "github_installation") {
+      const home = await source.getHome().catch(() => ({ accounts: [], repos: [] }));
       return c.json({
         data: (home.accounts ?? []).map((a) => ({
           id: a.login,
@@ -255,8 +255,17 @@ export async function listResources(c: Context) {
         })),
       });
     }
+
+    // github_repository. `?owner=<login>` narrows to one org's repos (the tree
+    // picker's per-org lazy load) via listReposForOwner — which returns that
+    // org's full list, not just the primary installation's repos that getHome
+    // surfaces. No owner → fall back to the primary-installation repos.
+    const ownerParam = c.req.query("owner");
+    const repoList = ownerParam
+      ? (await source.listReposForOwner(ownerParam).catch(() => null)) ?? []
+      : (await source.getHome().catch(() => ({ repos: [] }))).repos ?? [];
     return c.json({
-      data: (home.repos ?? []).map((r) => ({
+      data: repoList.map((r) => ({
         id: r.full_name,
         label: r.full_name,
         meta: r.private ? { visibility: "private" } : { visibility: "public" },
@@ -536,6 +545,97 @@ export async function upsertGrant(c: Context) {
   });
 
   return c.json({ data: grant }, 201);
+}
+
+/**
+ * PUT /api/permissions/grants
+ * Body: { userId, grants: { resourceType, resourceId, permissions[] }[] }
+ *
+ * Replaces a member's ENTIRE grant set in one call, diffed server-side:
+ * added/changed tuples upserted, removed tuples deleted. The single save path
+ * for the member-grants editor (replaces the old per-tuple add/revoke loop).
+ * Zero-permission entries are treated as "not granted" (dropped).
+ */
+export async function replaceGrants(c: Context) {
+  const ctx = getRequestContext(c);
+  const organizationId = ctx.organizationId;
+  const actorUserId = ctx.userId;
+  const body = await c.req.json<{ userId?: string; grants?: unknown }>();
+
+  if (!body.userId) return c.json({ error: "userId is required" }, 400);
+  if (!Array.isArray(body.grants)) return c.json({ error: "grants array is required" }, 400);
+
+  const member = await repos.member.find(organizationId, body.userId);
+  if (!member) {
+    return c.json({ error: "Target user is not a member of this organization" }, 404);
+  }
+
+  // Validate + normalize desired grants (key by type:id; drop zero-perm rows).
+  const desired = new Map<
+    string,
+    { resourceType: ResourceType; resourceId: string; permissions: Permission[] }
+  >();
+  for (const raw of body.grants as Array<Record<string, unknown>>) {
+    const resourceType = raw.resourceType as ResourceType;
+    const resourceId = typeof raw.resourceId === "string" ? raw.resourceId : "";
+    if (!resourceId || !ALLOWED_RESOURCE_TYPES.includes(resourceType)) {
+      return c.json(
+        { error: `Invalid grant: ${String(raw.resourceType)}/${resourceId}`, code: "INVALID_RESOURCE_TYPE" },
+        400,
+      );
+    }
+    const permissions = parsePermissions(raw.permissions);
+    if (permissions.length === 0) continue;
+    // Confirm row-backed, non-wildcard resources belong to this org. GitHub
+    // (login/"owner/repo") is validated by the owner-run catalog; billing/audit
+    // and the "*" wildcard are org-scoped by definition.
+    const isWildcard = resourceId === "*";
+    const isGithub = resourceType === "github_installation" || resourceType === "github_repository";
+    const isSingleton = resourceType === "billing" || resourceType === "audit";
+    if (!isWildcard && !isGithub && !isSingleton) {
+      const ok = await resourceBelongsToOrg(resourceType, resourceId, organizationId);
+      if (!ok) {
+        return c.json(
+          { error: `Resource not in this organization: ${resourceType}/${resourceId}`, code: "RESOURCE_NOT_IN_ORG" },
+          400,
+        );
+      }
+    }
+    desired.set(`${resourceType}:${resourceId}`, { resourceType, resourceId, permissions });
+  }
+
+  const existing = await repos.resourceGrant.listByMember(organizationId, body.userId);
+  const existingByKey = new Map(existing.map((g) => [`${g.resourceType}:${g.resourceId}`, g]));
+  const permsKey = (p: Permission[]) => [...p].sort().join(",");
+
+  for (const g of existing) {
+    if (!desired.has(`${g.resourceType}:${g.resourceId}`)) {
+      await repos.resourceGrant.delete(g.id, organizationId);
+    }
+  }
+  for (const [key, d] of desired) {
+    const prev = existingByKey.get(key);
+    if (!prev || permsKey(prev.permissions) !== permsKey(d.permissions)) {
+      await repos.resourceGrant.upsert({
+        organizationId,
+        userId: body.userId,
+        resourceType: d.resourceType,
+        resourceId: d.resourceId,
+        permissions: d.permissions,
+        grantedByUserId: actorUserId,
+      });
+    }
+  }
+
+  const next = await repos.resourceGrant.listByMember(organizationId, body.userId);
+  audit.recordAsync(auditContextFrom(c, organizationId, actorUserId), {
+    eventType: "grant.replaced",
+    resourceType: "resource_grant",
+    resourceId: body.userId,
+    before: { count: existing.length },
+    after: { count: next.length },
+  });
+  return c.json({ data: next });
 }
 
 /**

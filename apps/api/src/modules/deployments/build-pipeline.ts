@@ -529,6 +529,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       buildStrategy,
       isDesktop: plat.target === "desktop",
       forwardGitCredentials: snapshot.forwardGitCredentials,
+      repoIsGithub: !!project.gitOwner,
     });
     const cloneOnServer = clonePlan.runsOnServer;
     const allowRelayFallback = clonePlan.relayEligible;

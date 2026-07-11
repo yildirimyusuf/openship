@@ -14,56 +14,29 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Loader2,
-  Mail,
-  Plus,
-  Trash2,
-  UserPlus,
-  X,
-  Building2,
-  Sparkles,
-  Users as UsersIcon,
-  Shield,
-  Lock,
-  Send,
-  Cloud,
-} from "lucide-react";
+import { Loader2, Mail, Plus, Trash2, UserPlus, Building2 } from "lucide-react";
 import { authClient, useSession } from "@/lib/auth-client";
 import { useToast } from "@/context/ToastContext";
-import { api, ApiError, getApiErrorMessage, isNetworkError } from "@/lib/api";
-import { ResourcePicker, type PickerGrant } from "@/components/permissions/ResourcePicker";
+import {
+  api,
+  ApiError,
+  getApiErrorMessage,
+  isNetworkError,
+  permissionsApi,
+  type PickerGrant,
+  type ResourceGrant,
+  type ResourceType,
+} from "@/lib/api";
+import { useModal } from "@/context/ModalContext";
+import { GrantPickerModal } from "./GrantPickerModal";
+import { InviteMemberModal } from "./InviteMemberModal";
 import { usePlatform } from "@/context/PlatformContext";
 import { TeamWorkspaceCard } from "./TeamWorkspaceCard";
 
 type MemberRole = "owner" | "admin" | "member" | "restricted";
 
-type ResourceType =
-  | "project"
-  | "server"
-  | "mail_server"
-  | "backup_destination"
-  | "billing"
-  | "audit"
-  | "github_installation"
-  | "github_repository";
-
-type Permission = "read" | "write" | "admin";
-
-/** Human label for a grant's resource type (the raw enum is shown otherwise). */
-function resourceTypeLabel(type: string): string {
-  if (type === "github_installation") return "GitHub org";
-  if (type === "github_repository") return "GitHub repo";
-  return type;
-}
-
-interface ResourceGrant {
-  id: string;
-  userId: string;
-  resourceType: ResourceType;
-  resourceId: string;
-  permissions: Permission[];
-}
+// ResourceType / PickerGrant / ResourceGrant / resourceTypeLabel are the shared
+// definitions from @/lib/api (imported above).
 
 interface MemberRow {
   id: string;
@@ -109,40 +82,27 @@ const orgClient = (authClient as unknown as {
 export function TeamTab() {
   const { data: session } = useSession();
   const { showToast } = useToast();
+  const { showModal, hideModal } = useModal();
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [invitations, setInvitations] = useState<InvitationRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [inviteOpen, setInviteOpen] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<MemberRole>("member");
-  const [inviting, setInviting] = useState(false);
 
-  // Resource grants panel state
-  const [selectedMember, setSelectedMember] = useState<MemberRow | null>(null);
-  const [grants, setGrants] = useState<ResourceGrant[]>([]);
-  const [grantsLoading, setGrantsLoading] = useState(false);
-  const [addGrantOpen, setAddGrantOpen] = useState(false);
-  // Catalog-picker-driven grants in the "Add grant" panel. The picker
-  // handles type/id/permissions internally so we only track the resulting
-  // selection array here.
-  const [pickerGrants, setPickerGrants] = useState<PickerGrant[]>([]);
-  const [savingGrant, setSavingGrant] = useState(false);
-
-  // Invite-modal extras: pending grants picked when role = restricted.
-  const [invitePickerGrants, setInvitePickerGrants] = useState<PickerGrant[]>([]);
-
-  // Per-instance invitation mail source. Loaded from /api/system/settings.
-  // The toggle in the invite modal persists this choice via PATCH —
-  // each invite picks up the latest value through the backend's
-  // sendInvitationEmail callback (which re-reads on every send).
+  // Per-instance invitation mail source, loaded from /api/system/settings and
+  // passed to the invite modal as its initial value (the modal owns changes).
   type InvitationMailSource = "platform" | "cloud";
   const [invitationMailSource, setInvitationMailSource] =
     useState<InvitationMailSource>("platform");
-  const [savingMailSource, setSavingMailSource] = useState(false);
   const [teamMode, setTeamMode] = useState<
     "single_user" | "self_hosted_remote" | "cloud_hosted" | "tunneled"
   >("single_user");
   const { selfHosted } = usePlatform();
+
+  // Mode-aware grantable types: servers + mail servers are self-hosted-only;
+  // billing exists only in cloud (SaaS). The picker collapses the two GitHub
+  // types into one tab.
+  const availableTypes: ResourceType[] = selfHosted
+    ? ["project", "server", "mail_server", "backup_destination", "audit", "github_installation", "github_repository"]
+    : ["project", "backup_destination", "billing", "audit", "github_installation", "github_repository"];
 
   // Org-meta: drives personal-vs-team UX. Personal workspaces (auto-
   // created on signup) hide the invite UI; clicking "Create team org"
@@ -182,8 +142,13 @@ export function TeamTab() {
       setMembers(mRes.data?.members ?? []);
       setInvitations(iRes.data ?? []);
       setOrgMeta(metaRes.data);
+      // SaaS has no self-hosted mail server — invites always go via cloud and
+      // the "Send via" chooser is hidden, so only honor a stored source when
+      // self-hosted.
       const src = settingsRes?.invitationMailSource;
-      if (src === "platform" || src === "cloud") {
+      if (!selfHosted) {
+        setInvitationMailSource("cloud");
+      } else if (src === "platform" || src === "cloud") {
         setInvitationMailSource(src);
       }
       const tm = (settingsRes as { teamMode?: typeof teamMode })?.teamMode;
@@ -199,22 +164,7 @@ export function TeamTab() {
       setLoading(false);
       refreshingRef.current = false;
     }
-  }, [showToast]);
-
-  const handleMailSourceChange = async (next: InvitationMailSource) => {
-    if (next === invitationMailSource) return;
-    const prev = invitationMailSource;
-    setInvitationMailSource(next);
-    setSavingMailSource(true);
-    try {
-      await api.patch("system/settings", { invitationMailSource: next });
-    } catch (err) {
-      setInvitationMailSource(prev);
-      showToast(getApiErrorMessage(err, "Failed to update mail source"), "error", "Settings");
-    } finally {
-      setSavingMailSource(false);
-    }
-  };
+  }, [showToast, selfHosted]);
 
   const handleCreateTeam = async () => {
     const name = newTeamName.trim();
@@ -262,42 +212,24 @@ export function TeamTab() {
     void refresh();
   }, [refresh]);
 
-  const handleInvite = async () => {
-    if (!inviteEmail.trim()) return;
-    setInviting(true);
-    try {
-      // For role=restricted with inline grants, use invite-with-grants
-      // so the grants land in pending storage and get materialized on
-      // accept. For other roles, fall back to Better Auth's standard
-      // inviteMember (no grants needed — they have org-wide access by
-      // role definition).
-      if (inviteRole === "restricted" && invitePickerGrants.length > 0) {
-        await api.post("permissions/invite-with-grants", {
-          email: inviteEmail.trim(),
-          role: inviteRole,
-          grants: invitePickerGrants,
-        });
-      } else {
-        const res = await orgClient.inviteMember({
-          email: inviteEmail.trim(),
-          role: inviteRole,
-        });
-        if (res.error) {
-          showToast(res.error.message ?? "Failed to send invite", "error", "Invitation");
-          return;
-        }
-      }
-      showToast(`Invitation sent to ${inviteEmail}`, "success", "Invitation");
-      setInviteEmail("");
-      setInviteRole("member");
-      setInvitePickerGrants([]);
-      setInviteOpen(false);
-      await refresh();
-    } catch (err) {
-      showToast(getApiErrorMessage(err, "Failed to send invite"), "error", "Invitation");
-    } finally {
-      setInviting(false);
-    }
+  // Open the invite flow via the centralized modal hook (blurred, centered).
+  const openInvite = () => {
+    let id = "";
+    id = showModal({
+      // The content owns its own width (narrow single-column, or wide two-pane
+      // when "Restricted" is picked); cap the shell so it never clips.
+      maxWidth: "95vw",
+      showCloseButton: false,
+      customContent: (
+        <InviteMemberModal
+          availableTypes={availableTypes}
+          selfHosted={selfHosted}
+          initialMailSource={invitationMailSource}
+          onInvited={() => void refresh()}
+          onClose={() => hideModal(id)}
+        />
+      ),
+    });
   };
 
   const handleRoleChange = async (memberId: string, role: MemberRole) => {
@@ -328,84 +260,46 @@ export function TeamTab() {
     await refresh();
   };
 
-  const loadGrants = useCallback(async (userId: string) => {
-    setGrantsLoading(true);
-    try {
-      const res = await api.get<{ grants?: ResourceGrant[] } | ResourceGrant[]>(
-        "permissions/grants",
-        { params: { userId } },
-      );
-      const list = Array.isArray(res) ? res : (res?.grants ?? []);
-      setGrants(list);
-    } catch (err) {
-      showToast(getApiErrorMessage(err, "Failed to load grants"), "error", "Permissions");
-      setGrants([]);
-    } finally {
-      setGrantsLoading(false);
-    }
-  }, [showToast]);
-
-  const openMemberPanel = (m: MemberRow) => {
-    if (m.role === "owner") return;
-    setSelectedMember(m);
-    setAddGrantOpen(false);
-    setPickerGrants([]);
-    void loadGrants(m.userId);
-  };
-
-  const closeMemberPanel = () => {
-    setSelectedMember(null);
-    setGrants([]);
-    setAddGrantOpen(false);
-    setPickerGrants([]);
-  };
-
-  const handleAddGrant = async () => {
-    if (!selectedMember) return;
-    if (pickerGrants.length === 0) {
-      showToast("Pick at least one resource", "error", "Permissions");
-      return;
-    }
-    setSavingGrant(true);
-    try {
-      // ResourcePicker emits one row per (resourceType, resourceId).
-      // Persist them sequentially — backend upserts; partial failure
-      // surfaces the offending row.
-      for (const g of pickerGrants) {
-        if (g.permissions.length === 0) continue;
-        await api.post("permissions/grants", {
-          userId: selectedMember.userId,
+  // Open the resource-access editor for a member: load their current grants,
+  // then show the shared picker modal (blurred, centered) prefilled with them.
+  // Save replaces the whole set (server diffs add/change/remove).
+  const openMemberPanel = useCallback(
+    async (m: MemberRow) => {
+      if (m.role === "owner") return;
+      let initial: PickerGrant[] = [];
+      try {
+        const res = await permissionsApi.listGrants(m.userId);
+        initial = (res.data ?? []).map((g: ResourceGrant) => ({
           resourceType: g.resourceType,
           resourceId: g.resourceId,
           permissions: g.permissions,
-        });
+        }));
+      } catch (err) {
+        showToast(getApiErrorMessage(err, "Failed to load grants"), "error", "Permissions");
+        return;
       }
-      showToast(
-        `${pickerGrants.length} grant${pickerGrants.length === 1 ? "" : "s"} added`,
-        "success",
-        "Permissions",
-      );
-      setAddGrantOpen(false);
-      setPickerGrants([]);
-      await loadGrants(selectedMember.userId);
-    } catch (err) {
-      showToast(getApiErrorMessage(err, "Failed to add grant"), "error", "Permissions");
-    } finally {
-      setSavingGrant(false);
-    }
-  };
-
-  const handleRevokeGrant = async (grantId: string) => {
-    if (!selectedMember) return;
-    if (!confirm("Revoke this grant?")) return;
-    try {
-      await api.delete(`permissions/grants/${grantId}`);
-      showToast("Grant revoked", "success", "Permissions");
-      await loadGrants(selectedMember.userId);
-    } catch (err) {
-      showToast(getApiErrorMessage(err, "Failed to revoke grant"), "error", "Permissions");
-    }
-  };
+      let id = "";
+      id = showModal({
+        maxWidth: "640px",
+        showCloseButton: false,
+        customContent: (
+          <GrantPickerModal
+            title={m.user.name || m.user.email}
+            subtitle="Grants apply to restricted members. Owner/admin/member have org-wide access by default."
+            initial={initial}
+            availableTypes={availableTypes}
+            saveLabel="Save access"
+            onSave={async (grants) => {
+              await permissionsApi.replaceGrants(m.userId, grants);
+              showToast("Access updated", "success", "Permissions");
+            }}
+            onClose={() => hideModal(id)}
+          />
+        ),
+      });
+    },
+    [availableTypes, showModal, hideModal, showToast],
+  );
 
   const myMembership = members.find((m) => m.userId === session?.user?.id);
   const isOwner = myMembership?.role === "owner";
@@ -444,7 +338,7 @@ export function TeamTab() {
         {isAdminOrOwner && (
           <button
             type="button"
-            onClick={() => setInviteOpen(true)}
+            onClick={openInvite}
             className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
           >
             <UserPlus className="size-4" />
@@ -453,29 +347,25 @@ export function TeamTab() {
         )}
       </div>
 
-      {/* Personal-workspace banner — Cloudflare-style "create a team
-          account to invite people" CTA. Only the owner of the personal
-          workspace sees this (admins of a team org won't). */}
+      {/* Secondary option for personal workspaces: spin up a separate team org.
+          Inviting directly is the primary path (the button up top), so this
+          stays a quiet, non-highlighted alternative — owner only. */}
       {isPersonalOrg && isOwner && (
-        <div className="rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/5 to-transparent p-5 flex items-start gap-4">
-          <div className="size-10 rounded-xl bg-primary/15 flex items-center justify-center shrink-0">
-            <Building2 className="size-5 text-primary" />
+        <div className="rounded-xl border border-border/50 bg-transparent p-4 flex items-center gap-3">
+          <div className="size-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+            <Building2 className="size-[18px] text-muted-foreground" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-              Create a team organization
-              <Sparkles className="size-3.5 text-primary" />
-            </h3>
-            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-              You can invite collaborators to this workspace directly. Prefer a
-              separate shared space instead? Create a team organization — it
-              stays isolated from your personal projects.
+            <p className="text-sm font-medium text-foreground">Create a team organization</p>
+            <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+              You can invite people here directly — or spin up a separate shared
+              space that stays isolated from your personal projects.
             </p>
           </div>
           <button
             type="button"
             onClick={() => setCreateTeamOpen(true)}
-            className="inline-flex items-center gap-2 rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors shrink-0"
           >
             <Plus className="size-3.5" />
             Create team
@@ -504,13 +394,13 @@ export function TeamTab() {
                     key={m.id}
                     role={clickable ? "button" : undefined}
                     tabIndex={clickable ? 0 : undefined}
-                    onClick={clickable ? () => openMemberPanel(m) : undefined}
+                    onClick={clickable ? () => void openMemberPanel(m) : undefined}
                     onKeyDown={
                       clickable
                         ? (e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
-                              openMemberPanel(m);
+                              void openMemberPanel(m);
                             }
                           }
                         : undefined
@@ -612,328 +502,6 @@ export function TeamTab() {
           see first. Owner-only, self-hosted single_user only. */}
       {showWorkspaceMigration && <TeamWorkspaceCard canMigrate={!!isOwner} />}
 
-      {/* Resource grants panel */}
-      {selectedMember && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6"
-          onClick={closeMemberPanel}
-        >
-          <div
-            className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 space-y-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center text-sm font-medium text-foreground shrink-0">
-                  {(selectedMember.user.name || selectedMember.user.email).slice(0, 1).toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-base font-semibold text-foreground truncate">
-                    {selectedMember.user.name || selectedMember.user.email}
-                  </h3>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {selectedMember.user.email}
-                  </p>
-                  <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground mt-1">
-                    {selectedMember.role}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={closeMemberPanel}
-                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0"
-                title="Close"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-
-            <div className="border-t border-border/50 pt-4 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-foreground">Resource access</h4>
-                {isAdminOrOwner && !addGrantOpen && (
-                  <button
-                    type="button"
-                    onClick={() => setAddGrantOpen(true)}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                  >
-                    <Plus className="size-3.5" />
-                    Add grant
-                  </button>
-                )}
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Grants only apply to members with role = restricted. Members with
-                owner/admin/member role have org-wide access by default.
-              </p>
-
-              {grantsLoading ? (
-                <div className="flex items-center justify-center py-6">
-                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                </div>
-              ) : grants.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border/50 px-4 py-6 text-center">
-                  <p className="text-sm text-muted-foreground">No resource grants yet.</p>
-                </div>
-              ) : (
-                <div className="rounded-xl border border-border/50 divide-y divide-border/40 overflow-hidden">
-                  {grants.map((g) => (
-                    <div
-                      key={g.id}
-                      className="px-4 py-3 flex items-center gap-3"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate">
-                          <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground mr-2">
-                            {resourceTypeLabel(g.resourceType)}
-                          </span>
-                          {g.resourceId === "*" ? (
-                            <span className="text-muted-foreground">*</span>
-                          ) : (
-                            <span className="font-mono text-xs">{g.resourceId}</span>
-                          )}
-                        </p>
-                        <div className="mt-1 flex flex-wrap items-center gap-1">
-                          {g.permissions.map((p) => (
-                            <span
-                              key={p}
-                              className="inline-flex items-center px-2 py-0.5 rounded-md bg-muted text-[10px] font-medium uppercase tracking-wider text-foreground/80"
-                            >
-                              {p}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                      {isAdminOrOwner && (
-                        <button
-                          type="button"
-                          onClick={() => handleRevokeGrant(g.id)}
-                          className="text-xs font-medium text-muted-foreground hover:text-destructive transition-colors"
-                        >
-                          Revoke
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {addGrantOpen && (
-                <div className="rounded-xl border border-border/50 bg-muted/20 p-4 space-y-3">
-                  {/* Catalog-driven picker. Lists Projects / Servers /
-                      Mail servers / Backup destinations + a wildcard "All"
-                      row. Per-resource permission chips inside the picker. */}
-                  <ResourcePicker
-                    value={pickerGrants}
-                    onChange={setPickerGrants}
-                    defaultPermissions={["read"]}
-                    disabled={savingGrant}
-                  />
-
-                  <div className="flex items-center justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAddGrantOpen(false);
-                        setPickerGrants([]);
-                      }}
-                      disabled={savingGrant}
-                      className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleAddGrant}
-                      disabled={savingGrant || pickerGrants.length === 0}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-xl text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-                    >
-                      {savingGrant && <Loader2 className="size-3.5 animate-spin" />}
-                      Save {pickerGrants.length > 0 ? `${pickerGrants.length} grant${pickerGrants.length === 1 ? "" : "s"}` : "grant"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Invite modal — two-pane layout: left = invite form (email + role
-          cards stacked vertically), right = ResourcePicker that appears
-          only when role=restricted. Modal width animates from compact
-          (max-w-lg) to wide (max-w-4xl) when the right pane is needed. */}
-      {inviteOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6"
-          onClick={() => !inviting && setInviteOpen(false)}
-        >
-          <div
-            className={`w-full max-h-[85vh] overflow-hidden rounded-2xl border border-border/50 bg-card transition-[max-width] duration-300 ease-out ${
-              inviteRole === "restricted" ? "max-w-4xl" : "max-w-lg"
-            }`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex flex-col md:flex-row max-h-[85vh]">
-              {/* ── Left pane: email + role cards ──────────────────── */}
-              <div
-                className={`flex flex-col p-6 space-y-5 overflow-y-auto ${
-                  inviteRole === "restricted"
-                    ? "md:w-[420px] md:shrink-0 md:border-r md:border-border/50"
-                    : "w-full"
-                }`}
-              >
-                <div>
-                  <h3 className="text-lg font-semibold text-foreground">Invite a member</h3>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    We'll email them a link to join this organization.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground block">Email</label>
-                  <input
-                    type="email"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    placeholder="teammate@example.com"
-                    disabled={inviting}
-                    className="w-full px-3 py-2 bg-muted/30 border border-border/50 rounded-xl text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground block">Role</label>
-                  <div className="space-y-2">
-                    <RoleCard
-                      icon={UsersIcon}
-                      title="Member"
-                      description="Read + write to all resources in this organization."
-                      selected={inviteRole === "member"}
-                      disabled={inviting}
-                      onClick={() => {
-                        setInviteRole("member");
-                        setInvitePickerGrants([]);
-                      }}
-                    />
-                    <RoleCard
-                      icon={Shield}
-                      title="Admin"
-                      description="Everything Member can do, plus manage members + billing."
-                      selected={inviteRole === "admin"}
-                      disabled={inviting}
-                      onClick={() => {
-                        setInviteRole("admin");
-                        setInvitePickerGrants([]);
-                      }}
-                    />
-                    <RoleCard
-                      icon={Lock}
-                      title="Restricted"
-                      description="No default access — pick exactly which resources to unlock."
-                      selected={inviteRole === "restricted"}
-                      disabled={inviting}
-                      onClick={() => setInviteRole("restricted")}
-                      badge={
-                        inviteRole === "restricted" && invitePickerGrants.length > 0
-                          ? `${invitePickerGrants.length} grant${invitePickerGrants.length === 1 ? "" : "s"}`
-                          : undefined
-                      }
-                    />
-                  </div>
-                </div>
-
-                {/* Mail source toggle. Persists to instance_settings
-                    so every subsequent invite uses the chosen source
-                    until flipped again. */}
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground block">
-                    Send via
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleMailSourceChange("platform")}
-                      disabled={inviting || savingMailSource}
-                      aria-pressed={invitationMailSource === "platform"}
-                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-all disabled:opacity-50 ${
-                        invitationMailSource === "platform"
-                          ? "border-primary/40 bg-primary/[0.06] text-foreground"
-                          : "border-border/50 bg-muted/[0.05] text-muted-foreground hover:bg-muted/15"
-                      }`}
-                    >
-                      <Send className="size-3.5" />
-                      Your mail server
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleMailSourceChange("cloud")}
-                      disabled={inviting || savingMailSource}
-                      aria-pressed={invitationMailSource === "cloud"}
-                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition-all disabled:opacity-50 ${
-                        invitationMailSource === "cloud"
-                          ? "border-primary/40 bg-primary/[0.06] text-foreground"
-                          : "border-border/50 bg-muted/[0.05] text-muted-foreground hover:bg-muted/15"
-                      }`}
-                    >
-                      <Cloud className="size-3.5" />
-                      Openship Cloud
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-end gap-2 pt-2 mt-auto">
-                  <button
-                    type="button"
-                    onClick={() => setInviteOpen(false)}
-                    disabled={inviting}
-                    className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleInvite}
-                    disabled={inviting || !inviteEmail.trim()}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-                  >
-                    {inviting && <Loader2 className="size-4 animate-spin" />}
-                    Send invite
-                  </button>
-                </div>
-              </div>
-
-              {/* ── Right pane: resource picker — only when Restricted ── */}
-              {inviteRole === "restricted" && (
-                <div className="flex-1 flex flex-col p-6 space-y-4 overflow-y-auto bg-muted/[0.04] border-t md:border-t-0 border-border/50">
-                  <div>
-                    <h4 className="text-sm font-semibold text-foreground">
-                      Initial resource access
-                    </h4>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Restricted members start with no access. Pick which
-                      resources this invite will unlock once accepted —
-                      you can grant more later from the member's row.
-                    </p>
-                  </div>
-                  {/* The picker selection is sent to /invite-with-grants
-                      on Send, and materialized as resource_grant rows when
-                      the invitee accepts (see accept-invite/[id]/page.tsx). */}
-                  <ResourcePicker
-                    value={invitePickerGrants}
-                    onChange={setInvitePickerGrants}
-                    defaultPermissions={["read"]}
-                    disabled={inviting}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Create Team org modal — Cloudflare-style separate account
           creation. Spawns a fresh org with is_team=true; user becomes
           owner. After creation we setActive() to it and reload so the
@@ -1004,73 +572,3 @@ export function TeamTab() {
   );
 }
 
-/* ─── RoleCard ────────────────────────────────────────────────────── */
-
-/**
- * Vertically-stackable selectable card for picking an org role. Three of
- * these replace the old <select> dropdown so the trade-offs of each role
- * are visible upfront — without that, operators (rightly) miss that
- * Restricted is where the resource picker lives.
- */
-function RoleCard({
-  icon: Icon,
-  title,
-  description,
-  selected,
-  disabled,
-  onClick,
-  badge,
-}: {
-  icon: React.ElementType;
-  title: string;
-  description: string;
-  selected: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  badge?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-pressed={selected}
-      className={`w-full text-left flex items-start gap-3 rounded-xl border px-3.5 py-3 transition-all disabled:opacity-50 ${
-        selected
-          ? "border-primary/40 bg-primary/[0.06]"
-          : "border-border/50 bg-muted/[0.05] hover:bg-muted/15 hover:border-border"
-      }`}
-    >
-      <div
-        className={`size-8 rounded-lg flex items-center justify-center shrink-0 ${
-          selected ? "bg-primary/15 text-primary" : "bg-muted/40 text-muted-foreground"
-        }`}
-      >
-        <Icon className="size-4" strokeWidth={1.8} />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <p className="text-sm font-medium text-foreground">{title}</p>
-          {badge && (
-            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-primary/15 text-primary">
-              {badge}
-            </span>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-          {description}
-        </p>
-      </div>
-      <div
-        className={`size-4 rounded-full border-2 shrink-0 mt-0.5 transition-colors ${
-          selected ? "border-primary bg-primary" : "border-border/60"
-        }`}
-        aria-hidden
-      >
-        {selected && (
-          <div className="size-1.5 bg-background rounded-full m-auto mt-[3px]" />
-        )}
-      </div>
-    </button>
-  );
-}

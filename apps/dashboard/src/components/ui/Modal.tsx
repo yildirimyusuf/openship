@@ -76,20 +76,25 @@ export function Modal({
       style={{ zIndex }}
       onClick={handleBackdropClick}
     >
-      {/* Backdrop */}
+      {/* Backdrop. Light mode = white frost (`bg-background/80` over the white
+          page). In dark mode `--background` is pure black, so `/80` over the
+          also-black page collapses to a dead void with nothing for the blur to
+          show — override to the theme's own scrim value (`--th-overlay` = 60%
+          black) + a stronger blur so the page frosts through instead. */}
       <div
-        className="absolute inset-0 bg-background/80 backdrop-blur-sm transition-opacity duration-300"
+        className="absolute inset-0 bg-background/80 dark:bg-black/60 backdrop-blur-sm dark:backdrop-blur-md transition-opacity duration-300"
         style={{ opacity: isVisible ? 1 : 0 }}
         onClick={handleBackdropDivClick}
       />
 
-      {/* Modal Container. Uses the opaque overlay surface (`bg-popover`), NOT
-          `bg-card` — in dark mode card is a ~2.5%-opacity inline tint, so a
-          floating modal on it lets the page bleed through. Border adds definition
-          against the backdrop. */}
+      {/* Modal surface: the theme's SOLID card color (`--th-card-bg-solid`) —
+          opaque on purpose, so the blurred backdrop never bleeds through, and
+          it matches the app's cards instead of the lighter dropdown gray.
+          Border + shadow give it definition against the backdrop. */}
       <div
-        className="relative w-full bg-popover border border-border/60 rounded-2xl shadow-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
+        className="relative w-full border border-border/60 rounded-2xl shadow-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
         style={{
+          background: 'var(--th-card-bg-solid)',
           width,
           overflow,
           maxWidth,

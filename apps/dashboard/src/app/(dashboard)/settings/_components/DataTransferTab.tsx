@@ -1,18 +1,18 @@
 "use client";
 
 /**
- * Data tab (self-hosted only, owner-only) — export the entire instance
- * database to a file and import one on another install, for migrating
+ * Instance-tab section (self-hosted only, owner-only) — export the entire
+ * instance database to a file and import one on another install, for migrating
  * between two desktops. Secrets travel re-encrypted under a passphrase the
  * user sets on export and re-enters on import; the API re-encrypts them under
  * the destination install's own key.
  *
  * Owner gating is enforced by the API (requireRole("owner")); this component
- * hides the actions from non-owners as a courtesy.
+ * renders nothing for non-owners so the Instance tab stays clean.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { DatabaseBackup, Download, Upload, Loader2, ShieldAlert, TriangleAlert } from "lucide-react";
+import { DatabaseBackup, Download, Upload, Loader2, TriangleAlert } from "lucide-react";
 
 import { SettingsSection } from "./SettingsSection";
 import { Modal } from "@/components/ui/Modal";
@@ -57,21 +57,10 @@ export function DataTransferTab() {
     };
   }, [session?.user?.id]);
 
-  if (isOwner === false) {
-    return (
-      <SettingsSection
-        icon={ShieldAlert}
-        title="Data export & import"
-        description="Move your entire instance between machines."
-        iconBg="bg-amber-500/10"
-        iconColor="text-amber-600"
-      >
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          Only the workspace owner can export or import instance data.
-        </p>
-      </SettingsSection>
-    );
-  }
+  // Non-owners (and the brief pre-resolution window) render nothing — the
+  // section only appears for a confirmed owner, so the Instance tab shows just
+  // instance info for everyone else instead of a "denied" card.
+  if (isOwner !== true) return null;
 
   return (
     <div className="space-y-6">

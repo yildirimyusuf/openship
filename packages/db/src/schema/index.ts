@@ -22,6 +22,7 @@ export { terminalSessions } from "./terminal-sessions";
 export { serviceTerminalSessions } from "./service-terminal-sessions";
 export { cloudHandoffCode } from "./cloud-handoff-code";
 export { personalAccessToken } from "./personal-access-token";
+export { personalAccessTokenGrant } from "./personal-access-token-grant";
 export {
   backupDestination,
   backupPolicy,

@@ -47,6 +47,14 @@ export type {
 } from "./migration";
 export { dataTransferApi } from "./data-transfer";
 export type { DataTransferFile, ImportMode, ImportResult } from "./data-transfer";
+export { permissionsApi, RESOURCE_TYPE_LABELS, resourceTypeLabel } from "./permissions";
+export type {
+  Permission,
+  ResourceType,
+  PickerGrant,
+  ResourceGrant,
+  CatalogEntry,
+} from "./permissions";
 export { settingsApi } from "./settings";
 export type {
   BuildMode,

@@ -77,6 +77,7 @@ import type {
   MakeActiveResult,
 } from "./types";
 import { BuildLogger, parseLogLevel, sq, injectGitToken } from "./build-pipeline";
+import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
 import { resolveDockerfileCandidates } from "./docker-paths";
@@ -655,6 +656,35 @@ export class DockerRuntime implements RuntimeAdapter {
     if (!executor) throw new Error("Clone-on-server requires an SSH executor on connectionOptions");
 
     const useHelper = !!config.gitCredentialHelperPath;
+
+    // Prefer a direct GitHub tarball download on the server (no git, no history,
+    // no context transfer) when we can authenticate without the relay. Falls
+    // through to git clone on ANY failure (relay-only desktop, non-github / ssh
+    // remote, private-without-token, curl/tar/network error).
+    if (!useHelper) {
+      const ref = config.commitSha || config.branch;
+      const tarUrl = githubTarballUrl(config.repoUrl, ref);
+      if (tarUrl) {
+        try {
+          log.log(`Fetching ${config.repoUrl} tarball on the server → ${remoteContextDir}...\n`);
+          await downloadTarballOnRemote(executor, {
+            url: tarUrl,
+            token: config.gitToken,
+            destDir: remoteContextDir,
+            onLog: (entry) => log.log(entry.message, parseLogLevel(entry.message)),
+          });
+          // A tarball has no .git, but strip defensively in case a repo tracks one.
+          await executor.exec(`rm -rf ${sq(`${remoteContextDir}/.git`)}`).catch(() => {});
+          return;
+        } catch (err) {
+          log.log(
+            `Tarball download failed (${safeErrorMessage(err)}); falling back to git clone.\n`,
+            "warn",
+          );
+        }
+      }
+    }
+
     const cloneUrl = useHelper ? config.repoUrl : injectGitToken(config.repoUrl, config.gitToken);
     const GIT_ENV = useHelper
       ? `GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=${sq(config.gitCredentialHelperPath!)} GIT_CONFIG_KEY_1=credential.useHttpPath GIT_CONFIG_VALUE_1=true`

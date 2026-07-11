@@ -1226,6 +1226,10 @@ export async function runPreflightChecks(
     buildStrategy: effectiveBuildStrategy,
     isDesktop: plat.target === "desktop",
     forwardGitCredentials: snapshot.forwardGitCredentials,
+    // GitHub projects carry a parsed gitOwner; docker acquires the source
+    // tarball on the server for them. Same structured signal the pipeline uses
+    // (`!!project.gitOwner`) so the two decisions can't drift.
+    repoIsGithub: !!opts?.gitOwner,
   }).dockerClonesOnServer;
   if (dockerClonesOnServer) {
     checks.push(

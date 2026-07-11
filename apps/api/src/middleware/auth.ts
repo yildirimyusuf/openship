@@ -112,6 +112,7 @@ async function tryPatAuth(c: Context, next: Next): Promise<Response | typeof PAT
     user,
     { id: `pat:${pat.id}`, activeOrganizationId: pat.organizationId },
     "bearer",
+    { tokenId: pat.id, scoped: pat.scoped },
   );
   await next();
   return PAT_HANDLED;
@@ -236,6 +237,7 @@ async function applyAuthedRequest(
     | { id?: string; activeOrganizationId?: string | null }
     | null,
   sessionKind: SessionKind,
+  patScope?: { tokenId: string; scoped: boolean },
 ): Promise<void> {
   c.set("user", user);
   if (session && sessionKind !== "zero-auth") c.set("session", session);
@@ -259,7 +261,12 @@ async function applyAuthedRequest(
   // other middlewares will reject the request appropriately.
   if (!membership) return;
 
-  const role = (membership.role ?? "member") as RequestContextRole;
+  // A scoped PAT acts as a restricted principal whose grants come from the
+  // token (permission.assert / github-access read them via tokenScope), so
+  // force the role here regardless of the owner's actual membership role.
+  const role: RequestContextRole = patScope?.scoped
+    ? "restricted"
+    : ((membership.role ?? "member") as RequestContextRole);
   const clientIp = (c.get("clientIp") as string | null | undefined) ?? null;
   const userAgent = c.req.header("user-agent")?.trim() || null;
 
@@ -276,6 +283,7 @@ async function applyAuthedRequest(
       membershipId: membership.id,
       sessionId: session?.id ?? "zero-auth",
       sessionKind,
+      tokenScope: patScope?.scoped ? { tokenId: patScope.tokenId } : null,
       clientIp,
       userAgent,
       traceId: randomUUID(),

@@ -1,73 +1,104 @@
 "use client";
 
 /**
- * ResourcePicker — Cloudflare-style multi-select for grantable resources.
+ * ResourcePicker — multi-select for grantable resources, shared by the invite
+ * flow, the member-grants editor, and (Phase 2) token scoping.
  *
- * Replaces the legacy "type a resource id" textbox with a real picker:
- *   - Switch between resource types (Project / Server / Mail server / Backup)
+ *   - Switch between resource types (Projects / Servers / … / GitHub)
  *   - Inline search (client-side filter)
- *   - "All resources" toggle that emits the wildcard `*` id
- *   - Multi-select via checkbox; emits a flat list of {resourceType, resourceId, permissions}
+ *   - "All resources" wildcard row that emits the `*` id
+ *   - Per-row read/write/admin permission chips
+ *   - GitHub is a hierarchical org→repo tree: check a whole org, OR expand it
+ *     to pick specific repos. A whole-org grant supersedes its repo grants.
  *
- * Server is the source of truth — the picker fetches /api/permissions/resources?type=X
- * and renders the returned `{id, label, meta?}[]`. The wildcard `*` row
- * is synthesized client-side as a convenience; the backend treats it
- * identically to a specific id at the permission resolver level.
+ * Server is the source of truth — catalog rows come from
+ * /api/permissions/resources?type=X (+ optional ?owner= for repos under one org).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Loader2, Search } from "lucide-react";
-import { api, getApiErrorMessage } from "@/lib/api";
+import { Check, ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
+import {
+  permissionsApi,
+  RESOURCE_TYPE_LABELS,
+  type CatalogEntry,
+  type Permission,
+  type PickerGrant,
+  type ResourceType,
+} from "@/lib/api";
+import { getApiErrorMessage } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 
-export type Permission = "read" | "write" | "admin";
-
-export type ResourceType =
-  | "project"
-  | "server"
-  | "mail_server"
-  | "backup_destination"
-  | "billing"
-  | "audit"
-  | "github_installation"
-  | "github_repository";
-
-export interface PickerGrant {
-  resourceType: ResourceType;
-  /** "*" for "all of this type" OR a specific id from the catalog. */
-  resourceId: string;
-  permissions: Permission[];
-}
-
-interface CatalogEntry {
-  id: string;
-  label: string;
-  meta?: Record<string, unknown>;
-}
-
-const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
-  project: "Projects",
-  server: "Servers",
-  mail_server: "Mail servers",
-  backup_destination: "Backup destinations",
-  billing: "Billing",
-  audit: "Audit log",
-  github_installation: "GitHub orgs",
-  github_repository: "GitHub repos",
-};
+// Re-export for existing importers (TeamTab et al.) — canonical defs live in @/lib/api.
+export type { Permission, PickerGrant, ResourceType } from "@/lib/api";
 
 const PERMISSIONS: Permission[] = ["read", "write", "admin"];
+
+const DEFAULT_TYPES: ResourceType[] = [
+  "project",
+  "server",
+  "mail_server",
+  "backup_destination",
+  "billing",
+  "audit",
+  "github_installation",
+  "github_repository",
+];
+
+/** A tab collapses the two GitHub resource types into one "github" tab. */
+type TabId = ResourceType | "github";
+
+function toTabs(types: ResourceType[]): TabId[] {
+  const out: TabId[] = [];
+  let github = false;
+  for (const t of types) {
+    if (t === "github_installation" || t === "github_repository") {
+      if (!github) {
+        out.push("github");
+        github = true;
+      }
+    } else {
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+function tabLabel(tab: TabId): string {
+  return tab === "github" ? "GitHub" : RESOURCE_TYPE_LABELS[tab];
+}
+
+// ── Pure grant helpers (shared by the flat list + the GitHub tree) ──────────
+function findGrantIn(
+  value: PickerGrant[],
+  resourceType: ResourceType,
+  resourceId: string,
+): PickerGrant | undefined {
+  return value.find((g) => g.resourceType === resourceType && g.resourceId === resourceId);
+}
+
+function writeGrant(
+  value: PickerGrant[],
+  resourceType: ResourceType,
+  resourceId: string,
+  perms: Permission[],
+): PickerGrant[] {
+  const next = value.filter(
+    (g) => !(g.resourceType === resourceType && g.resourceId === resourceId),
+  );
+  if (perms.length > 0) next.push({ resourceType, resourceId, permissions: perms });
+  return next;
+}
 
 interface ResourcePickerProps {
   /** Current selection (controlled). Caller owns the array. */
   value: PickerGrant[];
   onChange: (value: PickerGrant[]) => void;
+  /** Which resource types to offer, in order. Defaults to all. Callers compute
+   *  this from platform mode (e.g. hide mail_server in SaaS). */
+  availableTypes?: ResourceType[];
   /** Optional: restrict to a single resource type (no type tabs shown). */
   fixedType?: ResourceType;
-  /**
-   * Default permissions assigned when a new resource is checked. The
-   * user can still adjust per-row. Defaults to ["read"].
-   */
+  /** Default permissions when a resource is first checked. Defaults to ["read"]. */
   defaultPermissions?: Permission[];
   disabled?: boolean;
 }
@@ -75,194 +106,184 @@ interface ResourcePickerProps {
 export function ResourcePicker({
   value,
   onChange,
+  availableTypes,
   fixedType,
   defaultPermissions = ["read"],
   disabled,
 }: ResourcePickerProps) {
   const { showToast } = useToast();
-  const [activeType, setActiveType] = useState<ResourceType>(fixedType ?? "project");
+
+  const tabs = useMemo<TabId[]>(() => {
+    if (fixedType) return toTabs([fixedType]);
+    return toTabs(availableTypes ?? DEFAULT_TYPES);
+  }, [fixedType, availableTypes]);
+
+  const [activeTab, setActiveTab] = useState<TabId>(tabs[0] ?? "project");
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
 
-  const loadCatalog = useCallback(async (type: ResourceType) => {
-    setLoading(true);
-    try {
-      const res = await api.get<{ data?: CatalogEntry[] }>(
-        `permissions/resources?type=${encodeURIComponent(type)}`,
-      );
-      setCatalog(res.data ?? []);
-    } catch (err) {
-      showToast(getApiErrorMessage(err, "Failed to load resources"), "error", "Picker");
-      setCatalog([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [showToast]);
+  // Keep activeTab valid if the tab set changes (e.g. mode toggles).
+  useEffect(() => {
+    if (!tabs.includes(activeTab)) setActiveTab(tabs[0] ?? "project");
+  }, [tabs, activeTab]);
+
+  const isGithub = activeTab === "github";
+  const isSingleton = activeTab === "billing" || activeTab === "audit";
+
+  const loadCatalog = useCallback(
+    async (type: ResourceType) => {
+      setLoading(true);
+      try {
+        const res = await permissionsApi.listResources(type);
+        setCatalog(res.data ?? []);
+      } catch (err) {
+        showToast(getApiErrorMessage(err, "Failed to load resources"), "error", "Picker");
+        setCatalog([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [showToast],
+  );
 
   useEffect(() => {
-    void loadCatalog(activeType);
-  }, [activeType, loadCatalog]);
-
-  const findGrant = useCallback(
-    (resourceType: ResourceType, resourceId: string): PickerGrant | undefined =>
-      value.find(
-        (g) => g.resourceType === resourceType && g.resourceId === resourceId,
-      ),
-    [value],
-  );
-
-  const setGrant = useCallback(
-    (resourceType: ResourceType, resourceId: string, perms: Permission[]) => {
-      const next = value.filter(
-        (g) => !(g.resourceType === resourceType && g.resourceId === resourceId),
-      );
-      if (perms.length > 0) {
-        next.push({ resourceType, resourceId, permissions: perms });
-      }
-      onChange(next);
-    },
-    [value, onChange],
-  );
+    setSearch("");
+    if (!isGithub) void loadCatalog(activeTab as ResourceType);
+  }, [activeTab, isGithub, loadCatalog]);
 
   const toggleResource = (resourceType: ResourceType, resourceId: string) => {
-    const existing = findGrant(resourceType, resourceId);
-    if (existing) {
-      setGrant(resourceType, resourceId, []);
-    } else {
-      setGrant(resourceType, resourceId, defaultPermissions);
-    }
+    const existing = findGrantIn(value, resourceType, resourceId);
+    onChange(writeGrant(value, resourceType, resourceId, existing ? [] : defaultPermissions));
   };
 
-  const togglePermission = (
-    resourceType: ResourceType,
-    resourceId: string,
-    perm: Permission,
-  ) => {
-    const existing = findGrant(resourceType, resourceId);
-    const current = existing?.permissions ?? [];
+  const togglePermission = (resourceType: ResourceType, resourceId: string, perm: Permission) => {
+    const current = findGrantIn(value, resourceType, resourceId)?.permissions ?? [];
     const next = current.includes(perm)
       ? current.filter((p) => p !== perm)
       : [...current, perm];
-    setGrant(resourceType, resourceId, next);
+    onChange(writeGrant(value, resourceType, resourceId, next));
   };
 
-  // Wildcard (* — "All of this type") shown as the first row in every tab.
-  // Stored as a normal grant with resourceId="*". Selecting it doesn't
-  // disable per-resource selection — that's the caller's responsibility
-  // if they want exclusive semantics.
   const filteredCatalog = useMemo(() => {
     if (!search.trim()) return catalog;
     const q = search.trim().toLowerCase();
     return catalog.filter((c) => c.label.toLowerCase().includes(q));
   }, [catalog, search]);
 
-  const typeTabs: ResourceType[] = fixedType
-    ? [fixedType]
-    : [
-        "project",
-        "server",
-        "mail_server",
-        "backup_destination",
-        "billing",
-        "audit",
-        "github_installation",
-        "github_repository",
-      ];
+  const countForTab = (tab: TabId) =>
+    tab === "github"
+      ? value.filter(
+          (g) =>
+            g.resourceType === "github_installation" ||
+            g.resourceType === "github_repository",
+        ).length
+      : value.filter((g) => g.resourceType === tab).length;
 
   return (
     <div className="space-y-4">
       {/* Resource type tabs */}
-      {!fixedType && (
+      {tabs.length > 1 && (
         <div className="flex flex-wrap gap-1.5">
-          {typeTabs.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setActiveType(t)}
-              disabled={disabled}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
-                activeType === t
-                  ? "bg-primary/15 text-foreground border border-primary/40"
-                  : "bg-muted/40 text-muted-foreground hover:text-foreground border border-transparent"
-              }`}
-            >
-              {RESOURCE_TYPE_LABELS[t]}
-              {value.filter((g) => g.resourceType === t).length > 0 && (
-                <span className="ml-1.5 inline-flex items-center justify-center px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
-                  {value.filter((g) => g.resourceType === t).length}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Search */}
-      {activeType !== "billing" && activeType !== "audit" && (
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={`Search ${RESOURCE_TYPE_LABELS[activeType].toLowerCase()}...`}
-            disabled={disabled || loading}
-            className="w-full pl-9 pr-3 py-2 bg-card border border-border/50 rounded-xl text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-          />
-        </div>
-      )}
-
-      {/* Catalog list */}
-      <div className="rounded-xl border border-border/50 overflow-hidden max-h-[300px] overflow-y-auto divide-y divide-border/30">
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="size-4 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <>
-            {/* Wildcard "All" row — always at top for non-singleton types */}
-            {activeType !== "billing" && activeType !== "audit" && (
-              <ResourceRow
-                resourceType={activeType}
-                resourceId="*"
-                label={`All ${RESOURCE_TYPE_LABELS[activeType].toLowerCase()}`}
-                meta={{ wildcard: true }}
-                grant={findGrant(activeType, "*")}
-                onToggleResource={toggleResource}
-                onTogglePermission={togglePermission}
+          {tabs.map((t) => {
+            const count = countForTab(t);
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setActiveTab(t)}
                 disabled={disabled}
+                className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
+                  activeTab === t
+                    ? "bg-primary/15 text-foreground border border-primary/40"
+                    : "bg-muted/40 text-muted-foreground hover:text-foreground border border-transparent"
+                }`}
+              >
+                {tabLabel(t)}
+                {count > 0 && (
+                  <span className="ml-1.5 inline-flex items-center justify-center px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {isGithub ? (
+        <GitHubTree
+          value={value}
+          onChange={onChange}
+          defaultPermissions={defaultPermissions}
+          disabled={disabled}
+        />
+      ) : (
+        <>
+          {/* Search */}
+          {!isSingleton && (
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={`Search ${tabLabel(activeTab).toLowerCase()}...`}
+                disabled={disabled || loading}
+                className="w-full pl-9 pr-3 py-2 bg-card border border-border/50 rounded-xl text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
               />
-            )}
-            {/* Catalog rows */}
-            {filteredCatalog.length === 0 && !loading ? (
-              <div className="px-4 py-8 text-center">
-                <p className="text-sm text-muted-foreground">
-                  {search.trim()
-                    ? "No resources match your search."
-                    : `No ${RESOURCE_TYPE_LABELS[activeType].toLowerCase()} in this organization yet.`}
-                </p>
+            </div>
+          )}
+
+          {/* Catalog list */}
+          <div className="rounded-xl border border-border/50 overflow-hidden max-h-[340px] overflow-y-auto divide-y divide-border/30">
+            {loading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
               </div>
             ) : (
-              filteredCatalog.map((entry) => (
-                <ResourceRow
-                  key={entry.id}
-                  resourceType={activeType}
-                  resourceId={entry.id}
-                  label={entry.label}
-                  meta={entry.meta}
-                  grant={findGrant(activeType, entry.id)}
-                  onToggleResource={toggleResource}
-                  onTogglePermission={togglePermission}
-                  disabled={disabled}
-                />
-              ))
+              <>
+                {!isSingleton && (
+                  <ResourceRow
+                    resourceType={activeTab as ResourceType}
+                    resourceId="*"
+                    label={`All ${tabLabel(activeTab).toLowerCase()}`}
+                    meta={{ wildcard: true }}
+                    grant={findGrantIn(value, activeTab as ResourceType, "*")}
+                    onToggleResource={toggleResource}
+                    onTogglePermission={togglePermission}
+                    disabled={disabled}
+                  />
+                )}
+                {filteredCatalog.length === 0 ? (
+                  <div className="px-4 py-8 text-center">
+                    <p className="text-sm text-muted-foreground">
+                      {search.trim()
+                        ? "No resources match your search."
+                        : `No ${tabLabel(activeTab).toLowerCase()} in this organization yet.`}
+                    </p>
+                  </div>
+                ) : (
+                  filteredCatalog.map((entry) => (
+                    <ResourceRow
+                      key={entry.id}
+                      resourceType={activeTab as ResourceType}
+                      resourceId={entry.id}
+                      label={entry.label}
+                      meta={entry.meta}
+                      grant={findGrantIn(value, activeTab as ResourceType, entry.id)}
+                      onToggleResource={toggleResource}
+                      onTogglePermission={togglePermission}
+                      disabled={disabled}
+                    />
+                  ))
+                )}
+              </>
             )}
-          </>
-        )}
-      </div>
+          </div>
+        </>
+      )}
 
-      {/* Selection summary */}
       {value.length > 0 && (
         <p className="text-xs text-muted-foreground">
           {value.length} resource{value.length === 1 ? "" : "s"} selected across all types.
@@ -272,6 +293,43 @@ export function ResourcePicker({
   );
 }
 
+// ── Permission chips ────────────────────────────────────────────────────────
+function PermissionChips({
+  perms,
+  onToggle,
+  disabled,
+  indent = "ml-8",
+}: {
+  perms: Permission[];
+  onToggle: (p: Permission) => void;
+  disabled?: boolean;
+  indent?: string;
+}) {
+  return (
+    <div className={`mt-2 ${indent} flex flex-wrap items-center gap-1.5`}>
+      {PERMISSIONS.map((p) => {
+        const active = perms.includes(p);
+        return (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onToggle(p)}
+            disabled={disabled}
+            className={`px-2 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wider transition-colors ${
+              active
+                ? "bg-primary/20 text-foreground border border-primary/40"
+                : "bg-muted/40 text-muted-foreground border border-transparent hover:text-foreground"
+            }`}
+          >
+            {p}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Flat catalog row ─────────────────────────────────────────────────────────
 function ResourceRow({
   resourceType,
   resourceId,
@@ -297,20 +355,7 @@ function ResourceRow({
   return (
     <div className={`px-4 py-3 ${checked ? "bg-primary/5" : "hover:bg-muted/20"} transition-colors`}>
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => onToggleResource(resourceType, resourceId)}
-          disabled={disabled}
-          className={`size-5 rounded border-2 flex items-center justify-center transition-colors shrink-0 ${
-            checked
-              ? "bg-primary border-primary text-primary-foreground"
-              : "border-border/60 hover:border-primary/60"
-          }`}
-          aria-checked={checked}
-          role="checkbox"
-        >
-          {checked && <Check className="size-3" />}
-        </button>
+        <Checkbox checked={checked} disabled={disabled} onClick={() => onToggleResource(resourceType, resourceId)} />
         <div className="flex-1 min-w-0">
           <p className={`text-sm font-medium truncate ${isWildcard ? "text-foreground/90" : "text-foreground"}`}>
             {label}
@@ -330,30 +375,296 @@ function ResourceRow({
           )}
         </div>
       </div>
-
-      {/* Per-row permissions — only shown when the resource is checked */}
       {checked && (
-        <div className="mt-2 ml-8 flex flex-wrap items-center gap-1.5">
-          {PERMISSIONS.map((p) => {
-            const active = grant?.permissions.includes(p) ?? false;
-            return (
-              <button
-                key={p}
-                type="button"
-                onClick={() => onTogglePermission(resourceType, resourceId, p)}
-                disabled={disabled}
-                className={`px-2 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wider transition-colors ${
-                  active
-                    ? "bg-primary/20 text-foreground border border-primary/40"
-                    : "bg-muted/40 text-muted-foreground border border-transparent hover:text-foreground"
-                }`}
-              >
-                {p}
-              </button>
-            );
-          })}
-        </div>
+        <PermissionChips
+          perms={grant?.permissions ?? []}
+          onToggle={(p) => onTogglePermission(resourceType, resourceId, p)}
+          disabled={disabled}
+        />
       )}
+    </div>
+  );
+}
+
+function Checkbox({
+  checked,
+  disabled,
+  onClick,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      role="checkbox"
+      aria-checked={checked}
+      className={`size-5 rounded border-2 flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 ${
+        checked
+          ? "bg-primary border-primary text-primary-foreground"
+          : "border-border/60 hover:border-primary/60"
+      }`}
+    >
+      {checked && <Check className="size-3" />}
+    </button>
+  );
+}
+
+// ── GitHub org → repo tree ────────────────────────────────────────────────────
+function GitHubTree({
+  value,
+  onChange,
+  defaultPermissions,
+  disabled,
+}: {
+  value: PickerGrant[];
+  onChange: (v: PickerGrant[]) => void;
+  defaultPermissions: Permission[];
+  disabled?: boolean;
+}) {
+  const { showToast } = useToast();
+  const [orgs, setOrgs] = useState<CatalogEntry[]>([]);
+  const [loadingOrgs, setLoadingOrgs] = useState(true);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [reposByOwner, setReposByOwner] = useState<Record<string, CatalogEntry[]>>({});
+  const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
+  const [repoSearch, setRepoSearch] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingOrgs(true);
+    permissionsApi
+      .listResources("github_installation")
+      .then((res) => {
+        if (!cancelled) setOrgs(res.data ?? []);
+      })
+      .catch((err) => {
+        if (!cancelled) showToast(getApiErrorMessage(err, "Failed to load GitHub orgs"), "error", "Picker");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingOrgs(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
+
+  const orgGrant = (login: string) => findGrantIn(value, "github_installation", login);
+  const repoGrant = (fullName: string) => findGrantIn(value, "github_repository", fullName);
+
+  const toggleOrg = (login: string) => {
+    const existing = orgGrant(login);
+    let next = writeGrant(value, "github_installation", login, existing ? [] : defaultPermissions);
+    if (!existing) {
+      // Whole-org supersedes any specific repo grants under it.
+      const lower = login.toLowerCase();
+      next = next.filter(
+        (g) =>
+          !(
+            g.resourceType === "github_repository" &&
+            g.resourceId.split("/")[0]?.toLowerCase() === lower
+          ),
+      );
+    }
+    onChange(next);
+  };
+
+  const loadRepos = useCallback(
+    async (login: string) => {
+      if (reposByOwner[login]) return;
+      setLoadingRepos((prev) => new Set(prev).add(login));
+      try {
+        const res = await permissionsApi.listResources("github_repository", login);
+        setReposByOwner((prev) => ({ ...prev, [login]: res.data ?? [] }));
+      } catch (err) {
+        showToast(getApiErrorMessage(err, `Failed to load repos for ${login}`), "error", "Picker");
+        setReposByOwner((prev) => ({ ...prev, [login]: [] }));
+      } finally {
+        setLoadingRepos((prev) => {
+          const n = new Set(prev);
+          n.delete(login);
+          return n;
+        });
+      }
+    },
+    [reposByOwner, showToast],
+  );
+
+  const toggleExpand = (login: string) => {
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(login)) n.delete(login);
+      else {
+        n.add(login);
+        void loadRepos(login);
+      }
+      return n;
+    });
+  };
+
+  if (loadingOrgs) {
+    return (
+      <div className="rounded-xl border border-border/50 flex items-center justify-center py-10">
+        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (orgs.length === 0) {
+    return (
+      <div className="rounded-xl border border-border/50 px-4 py-8 text-center">
+        <p className="text-sm text-muted-foreground">No GitHub organizations connected.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-border/50 overflow-hidden max-h-[380px] overflow-y-auto divide-y divide-border/30">
+      {orgs.map((org) => {
+        const login = org.id;
+        const grant = orgGrant(login);
+        const wholeOrg = !!grant;
+        const isOpen = expanded.has(login);
+        const repos = reposByOwner[login] ?? [];
+        const q = (repoSearch[login] ?? "").trim().toLowerCase();
+        const shownRepos = q ? repos.filter((r) => r.label.toLowerCase().includes(q)) : repos;
+        const repoCount = value.filter(
+          (g) =>
+            g.resourceType === "github_repository" &&
+            g.resourceId.split("/")[0]?.toLowerCase() === login.toLowerCase(),
+        ).length;
+
+        return (
+          <div key={login}>
+            {/* Org row */}
+            <div className={`px-3 py-3 ${wholeOrg ? "bg-primary/5" : "hover:bg-muted/20"} transition-colors`}>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => toggleExpand(login)}
+                  disabled={disabled}
+                  className="p-0.5 rounded text-muted-foreground hover:text-foreground disabled:opacity-40"
+                  aria-label={isOpen ? "Collapse" : "Expand"}
+                >
+                  {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                </button>
+                <Checkbox checked={wholeOrg} disabled={disabled} onClick={() => toggleOrg(login)} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-foreground truncate">
+                    {org.label}
+                    <span className="ml-2 text-[11px] text-muted-foreground">
+                      {wholeOrg ? "entire org" : repoCount > 0 ? `${repoCount} repo${repoCount === 1 ? "" : "s"}` : ""}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              {wholeOrg && (
+                <PermissionChips
+                  perms={grant?.permissions ?? []}
+                  onToggle={(p) => {
+                    const cur = grant?.permissions ?? [];
+                    onChange(
+                      writeGrant(
+                        value,
+                        "github_installation",
+                        login,
+                        cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p],
+                      ),
+                    );
+                  }}
+                  disabled={disabled}
+                  indent="ml-14"
+                />
+              )}
+            </div>
+
+            {/* Repos under this org */}
+            {isOpen && (
+              <div className="bg-muted/[0.03] border-t border-border/20">
+                {wholeOrg ? (
+                  <p className="px-12 py-3 text-xs text-muted-foreground italic">
+                    Covered by the org-wide grant above.
+                  </p>
+                ) : loadingRepos.has(login) ? (
+                  <div className="flex items-center justify-center py-6">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                  </div>
+                ) : repos.length === 0 ? (
+                  <p className="px-12 py-4 text-xs text-muted-foreground">No repositories.</p>
+                ) : (
+                  <>
+                    {repos.length > 8 && (
+                      <div className="px-10 pt-2 pb-1">
+                        <input
+                          type="text"
+                          value={repoSearch[login] ?? ""}
+                          onChange={(e) => setRepoSearch((prev) => ({ ...prev, [login]: e.target.value }))}
+                          placeholder="Search repos…"
+                          disabled={disabled}
+                          className="w-full px-3 py-1.5 bg-card border border-border/50 rounded-lg text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        />
+                      </div>
+                    )}
+                    {shownRepos.map((repo) => {
+                      const rg = repoGrant(repo.id);
+                      const checked = !!rg;
+                      return (
+                        <div
+                          key={repo.id}
+                          className={`pl-12 pr-4 py-2.5 ${checked ? "bg-primary/5" : "hover:bg-muted/20"} transition-colors`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <Checkbox
+                              checked={checked}
+                              disabled={disabled}
+                              onClick={() =>
+                                onChange(
+                                  writeGrant(
+                                    value,
+                                    "github_repository",
+                                    repo.id,
+                                    checked ? [] : defaultPermissions,
+                                  ),
+                                )
+                              }
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-foreground truncate">
+                                {repo.label.split("/")[1] ?? repo.label}
+                              </p>
+                            </div>
+                          </div>
+                          {checked && (
+                            <PermissionChips
+                              perms={rg?.permissions ?? []}
+                              onToggle={(p) => {
+                                const cur = rg?.permissions ?? [];
+                                onChange(
+                                  writeGrant(
+                                    value,
+                                    "github_repository",
+                                    repo.id,
+                                    cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p],
+                                  ),
+                                );
+                              }}
+                              disabled={disabled}
+                              indent="ml-8"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -18,6 +18,8 @@ export interface CreatePatInput {
   /** SHA-256 hex of the full token. Plaintext is never stored. */
   tokenHash: string;
   readOnly: boolean;
+  /** True when the token carries its own resource grants (see patGrant repo). */
+  scoped?: boolean;
   expiresAt: Date | null;
 }
 
@@ -36,6 +38,7 @@ export function createPersonalAccessTokenRepo(db: Database) {
           tokenPrefix: input.tokenPrefix,
           tokenHash: input.tokenHash,
           readOnly: input.readOnly,
+          scoped: input.scoped ?? false,
           expiresAt: input.expiresAt,
         })
         .returning();

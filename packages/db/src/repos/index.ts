@@ -184,6 +184,7 @@ import { createTerminalSessionRepo } from "./terminal-session.repo";
 import { createServiceTerminalSessionRepo } from "./service-terminal-session.repo";
 import { createCloudHandoffCodeRepo } from "./cloud-handoff-code.repo";
 import { createPersonalAccessTokenRepo } from "./personal-access-token.repo";
+import { createPersonalAccessTokenGrantRepo } from "./personal-access-token-grant.repo";
 import {
   createBackupDestinationRepo,
   createBackupPolicyRepo,
@@ -239,6 +240,7 @@ export const repos = {
   serviceTerminalSession: createServiceTerminalSessionRepo(db),
   cloudHandoffCode: createCloudHandoffCodeRepo(db),
   personalAccessToken: createPersonalAccessTokenRepo(db),
+  patGrant: createPersonalAccessTokenGrantRepo(db),
   backupDestination: createBackupDestinationRepo(db),
   backupPolicy: createBackupPolicyRepo(db),
   backupRun: createBackupRunRepo(db),

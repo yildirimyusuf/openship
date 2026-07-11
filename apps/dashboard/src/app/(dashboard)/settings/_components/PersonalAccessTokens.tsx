@@ -1,11 +1,19 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
-import { KeyRound, Plus, Trash2, Copy, Check, Loader2, ShieldCheck } from "lucide-react";
+import { KeyRound, Plus, Trash2, Copy, Check, Loader2, ShieldCheck, Lock, SlidersHorizontal } from "lucide-react";
 import { SettingsSection } from "./SettingsSection";
-import { tokensApi, getApiErrorMessage, type AccessToken } from "@/lib/api";
+import {
+  tokensApi,
+  getApiErrorMessage,
+  type AccessToken,
+  type PickerGrant,
+  type ResourceType,
+} from "@/lib/api";
+import { GrantPickerModal } from "./GrantPickerModal";
+import { useModal } from "@/context/ModalContext";
 import { useToast } from "@/context/ToastContext";
+import { usePlatform } from "@/context/PlatformContext";
 
 const EXPIRY_OPTIONS = [
   { label: "No expiry", days: 0 },
@@ -21,6 +29,7 @@ function fmtDate(iso: string | null): string {
 
 export function PersonalAccessTokens() {
   const { showToast } = useToast();
+  const { showModal, hideModal } = useModal();
   const [tokens, setTokens] = useState<AccessToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -28,9 +37,37 @@ export function PersonalAccessTokens() {
   const [name, setName] = useState("");
   const [readOnly, setReadOnly] = useState(false);
   const [expiryDays, setExpiryDays] = useState(0);
+  // Resource scope: when enabled the token is limited to `scopeGrants`.
+  const [scopeEnabled, setScopeEnabled] = useState(false);
+  const [scopeGrants, setScopeGrants] = useState<PickerGrant[]>([]);
   // The one-time plaintext token, shown until dismissed.
   const [newToken, setNewToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const { selfHosted } = usePlatform();
+  const availableTypes: ResourceType[] = selfHosted
+    ? ["project", "server", "mail_server", "backup_destination", "audit", "github_installation", "github_repository"]
+    : ["project", "backup_destination", "billing", "audit", "github_installation", "github_repository"];
+
+  // Open the shared grant picker (blurred, centered) to set the token's scope.
+  const openScopePicker = () => {
+    let id = "";
+    id = showModal({
+      maxWidth: "640px",
+      showCloseButton: false,
+      customContent: (
+        <GrantPickerModal
+          title="Token scope"
+          subtitle="The token is limited to exactly these resources. You can only grant access you hold yourself."
+          initial={scopeGrants}
+          availableTypes={availableTypes}
+          saveLabel="Done"
+          onSave={(g) => setScopeGrants(g)}
+          onClose={() => hideModal(id)}
+        />
+      ),
+    });
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -52,18 +89,25 @@ export function PersonalAccessTokens() {
       showToast("Give the token a name", "error", "Access tokens");
       return;
     }
+    if (scopeEnabled && scopeGrants.length === 0) {
+      showToast("Pick at least one resource, or turn off scoping", "error", "Access tokens");
+      return;
+    }
     setCreating(true);
     try {
       const res = await tokensApi.create({
         name: name.trim(),
         readOnly,
         ...(expiryDays > 0 ? { expiresInDays: expiryDays } : {}),
+        ...(scopeEnabled && scopeGrants.length > 0 ? { grants: scopeGrants } : {}),
       });
       setNewToken(res.data.token);
       setShowForm(false);
       setName("");
       setReadOnly(false);
       setExpiryDays(0);
+      setScopeEnabled(false);
+      setScopeGrants([]);
       await refresh();
     } catch (err) {
       showToast(getApiErrorMessage(err, "Failed to create token"), "error", "Access tokens");
@@ -105,17 +149,10 @@ export function PersonalAccessTokens() {
       <div className="mb-4 flex gap-2.5 rounded-xl border border-border/50 bg-muted/30 p-3">
         <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="text-xs leading-relaxed text-muted-foreground">
-          Each token <span className="font-medium text-foreground">acts as you</span> — it carries your role&apos;s
-          permissions in this organization. <span className="font-medium text-foreground">Read-only</span> blocks all
-          writes. Need a narrower, resource-scoped token? Invite a teammate with a limited role (Member / Restricted)
-          in{" "}
-          <Link
-            href="/settings?tab=team"
-            className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
-          >
-            Team
-          </Link>{" "}
-          and have them create it.
+          By default a token <span className="font-medium text-foreground">acts as you</span> — it carries your
+          role&apos;s permissions. <span className="font-medium text-foreground">Read-only</span> blocks all writes,
+          and <span className="font-medium text-foreground">Limit to specific resources</span> scopes a token to
+          exactly what you choose — even below your own role. Ideal for a narrow MCP token.
         </div>
       </div>
 
@@ -177,6 +214,38 @@ export function PersonalAccessTokens() {
               ))}
             </select>
           </div>
+
+          {/* Resource scope */}
+          <div className="rounded-lg border border-border/50 bg-muted/[0.04] p-3">
+            <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={scopeEnabled}
+                onChange={(e) => setScopeEnabled(e.target.checked)}
+                className="size-4 rounded border-border/60"
+              />
+              <Lock className="size-3.5 text-muted-foreground" />
+              Limit to specific resources
+            </label>
+            {scopeEnabled && (
+              <div className="mt-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={openScopePicker}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-transparent px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted/40 transition-colors"
+                >
+                  <SlidersHorizontal className="size-3.5" />
+                  Choose resources
+                </button>
+                <span className="text-xs text-muted-foreground">
+                  {scopeGrants.length > 0
+                    ? `${scopeGrants.length} resource${scopeGrants.length === 1 ? "" : "s"} selected`
+                    : "No resources selected yet"}
+                </span>
+              </div>
+            )}
+          </div>
+
           <div className="flex items-center gap-2">
             <button
               onClick={handleCreate}
@@ -222,6 +291,11 @@ export function PersonalAccessTokens() {
                   {t.readOnly && (
                     <span className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                       <ShieldCheck className="size-3" /> read-only
+                    </span>
+                  )}
+                  {t.scoped && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                      <Lock className="size-3" /> scoped
                     </span>
                   )}
                 </div>

@@ -115,6 +115,16 @@ export const endpoints = {
   },
 
   /* ---------------------------------------------------------------- */
+  /*  Permissions / resource grants                                   */
+  /* ---------------------------------------------------------------- */
+  permissions: {
+    resources: "permissions/resources",
+    grants: "permissions/grants",
+    grant: (id: string) => `permissions/grants/${encodeURIComponent(id)}`,
+    inviteWithGrants: "permissions/invite-with-grants",
+  },
+
+  /* ---------------------------------------------------------------- */
   /*  GitHub                                                          */
   /* ---------------------------------------------------------------- */
   github: {

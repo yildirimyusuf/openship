@@ -218,6 +218,13 @@
       "when": 1783624145593,
       "tag": "0030_bright_darkstar",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1783778263455,
+      "tag": "0031_conscious_catseye",
+      "breakpoints": true
     }
   ]
 }

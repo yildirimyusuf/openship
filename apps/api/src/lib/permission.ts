@@ -34,6 +34,7 @@ import { NotFoundError } from "@repo/core";
 import { repos } from "@repo/db";
 import type { Permission, ResourceType } from "@repo/db";
 import { getRequestContext, withScopedOrg, type RequestContext } from "./request-context";
+import { grantSourceFor, type GrantSource } from "./grant-source";
 import { env } from "../config";
 import { resolveOrgCloudUserId } from "./cloud/transport";
 
@@ -288,15 +289,19 @@ export async function checkPermission(
   userId: string,
   organizationId: string,
   input: PermissionInput,
+  opts?: {
+    /** Force a role regardless of membership — scoped tokens pass "restricted". */
+    roleOverride?: "owner" | "admin" | "member" | "restricted";
+    /** Where to read grants from — the token's grants for a scoped PAT. */
+    grants?: GrantSource;
+  },
 ): Promise<boolean> {
   const member = await repos.member.find(organizationId, userId);
   if (!member) return false;
 
-  const role = (member.role ?? "member") as
-    | "owner"
-    | "admin"
-    | "member"
-    | "restricted";
+  const role =
+    opts?.roleOverride ??
+    ((member.role ?? "member") as "owner" | "admin" | "member" | "restricted");
 
   // 1. Owner: all-access.
   if (role === "owner") return true;
@@ -331,7 +336,7 @@ export async function checkPermission(
         return false;
       }
     }
-    const grant = await repos.resourceGrant.findForResource(
+    const grant = await (opts?.grants ?? repos.resourceGrant).findForResource(
       organizationId,
       userId,
       root.rootType,
@@ -405,7 +410,12 @@ export async function assert(ctx: RequestContext, input: PermissionInput): Promi
     throw new NotFoundError(input.resourceType, input.resourceId);
   }
 
-  const allowed = await checkPermission(userId, organizationId, input);
+  // A scoped PAT is evaluated as a restricted principal whose grants come from
+  // the token — so even an owner's scoped token can't exceed the token's grants.
+  const opts = ctx.tokenScope
+    ? { roleOverride: "restricted" as const, grants: grantSourceFor(ctx) }
+    : undefined;
+  const allowed = await checkPermission(userId, organizationId, input, opts);
   if (!allowed) {
     throw new NotFoundError(input.resourceType, input.resourceId);
   }

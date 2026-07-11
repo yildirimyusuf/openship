@@ -11,7 +11,8 @@
  *
  *   Admin/owner only (the requireRole gate kicks in below the line):
  *     GET    /grants?userId=X                 list grants for a member
- *     POST   /grants                          create/replace a grant
+ *     POST   /grants                          upsert one grant (one tuple)
+ *     PUT    /grants                           replace a member's whole grant set
  *     DELETE /grants/:id                      revoke a grant
  *     GET    /invitations                     list pending invitations + their grants
  *     POST   /invite-with-grants              invite + attach pending grants in one call
@@ -47,6 +48,7 @@ r.use("*", requireRole("admin"));
 
 r.get("/grants", { tag: "permissions:read" }, ctrl.listGrants);
 r.post("/grants", { tag: "permissions:write" }, ctrl.upsertGrant);
+r.put("/grants", { tag: "permissions:write" }, ctrl.replaceGrants);
 r.delete("/grants/:id", { tag: "permissions:admin" }, ctrl.deleteGrant);
 r.get("/invitations", { tag: "permissions:read" }, ctrl.listInvitations);
 r.post(

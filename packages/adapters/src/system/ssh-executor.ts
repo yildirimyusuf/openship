@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, rm as fsRm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Transform } from "node:stream";
 
-import { getTarCreateEnv } from "../archive";
+import { getTarCreateArgs, getTarCreateEnv } from "../archive";
 import type {
   CommandExecutor,
   LogEntry,
@@ -20,7 +23,7 @@ import type { Client as SshClient, SFTPWrapper } from "ssh2";
 import type { Readable, Duplex } from "node:stream";
 import { connectSshClient, openSftp, openSshUnixSocket, type StreamLocalCapableClient } from "./ssh-client";
 import { SshDisconnectedError } from "./errors";
-import { safeErrorMessage } from "@repo/core";
+import { TRANSFER_EXCLUDES, formatBytes, safeErrorMessage } from "@repo/core";
 
 /** Clamp a window dimension to a sane range to avoid garbage values
  *  reaching ssh2.Client.shell() / channel.setWindow(). */
@@ -511,6 +514,17 @@ export class SshExecutor implements CommandExecutor {
         let localExited = false;
         let localExitCode: number | null = null;
         let localStderrBuffer = "";
+        // Single settle guard so EVERY exit path (clean close, forced close, a
+        // stalled/truncated remote, local spawn error) resolves or rejects the
+        // promise exactly once. A truncated transfer must FAIL the deploy — not
+        // hang the heartbeat forever (ssh2 has been seen to swallow the channel
+        // 'close' event on a stuck/truncated remote).
+        let settled = false;
+        const finish = (act: () => void) => {
+          if (settled) return;
+          settled = true;
+          act();
+        };
 
         if (onBytes) {
           // Backpressure-preserving Transform between local.stdout and the
@@ -567,6 +581,19 @@ export class SshExecutor implements CommandExecutor {
             } catch {
               /* channel may already be gone */
             }
+            // Settle even if ssh2 never surfaces the channel 'close'.
+            const failTimer = setTimeout(
+              () =>
+                finish(() =>
+                  reject(
+                    new Error(
+                      `Local pipe command failed (exit ${code})${localStderrBuffer ? ": " + localStderrBuffer.trim() : ""}`,
+                    ),
+                  ),
+                ),
+              10_000,
+            );
+            (failTimer as { unref?: () => void }).unref?.();
             return;
           }
           // Clean local exit. Two-step shutdown:
@@ -610,26 +637,44 @@ export class SshExecutor implements CommandExecutor {
             } catch {
               /* channel may already be closed */
             }
+            // If ssh2 STILL swallows the 'close' after the forced close (seen
+            // on a truncated/stuck remote), settle ourselves so the deploy
+            // fails fast instead of hanging indefinitely.
+            const stallTimer = setTimeout(
+              () =>
+                finish(() =>
+                  reject(
+                    new Error(
+                      "File transfer stalled: the remote did not finish extracting within the grace period (the archive may have been truncated mid-stream).",
+                    ),
+                  ),
+                ),
+              5_000,
+            );
+            (stallTimer as { unref?: () => void }).unref?.();
           }, REMOTE_DRAIN_GRACE_MS);
           (watchdog as { unref?: () => void }).unref?.();
           channel.once("close", () => clearTimeout(watchdog));
         });
 
         channel.on("close", (code: number) => {
-          // If the channel closes "cleanly" (code 0) but the local
-          // process actually failed, surface the local failure instead.
-          if (localExited && localExitCode !== null && localExitCode !== 0) {
-            return reject(
-              new Error(
-                `Local pipe command failed (exit ${localExitCode})${localStderrBuffer ? ": " + localStderrBuffer.trim() : ""}`,
-              ),
-            );
-          }
-          resolve({ code: code ?? 1 });
+          finish(() => {
+            // If the channel closes "cleanly" (code 0) but the local
+            // process actually failed, surface the local failure instead.
+            if (localExited && localExitCode !== null && localExitCode !== 0) {
+              reject(
+                new Error(
+                  `Local pipe command failed (exit ${localExitCode})${localStderrBuffer ? ": " + localStderrBuffer.trim() : ""}`,
+                ),
+              );
+              return;
+            }
+            resolve({ code: code ?? 1 });
+          });
         });
 
         local.on("error", (e) => {
-          reject(new Error(`Local process failed to start: ${e.message}`));
+          finish(() => reject(new Error(`Local process failed to start: ${e.message}`)));
         });
       });
     });
@@ -662,11 +707,27 @@ export class SshExecutor implements CommandExecutor {
       ) => this.pipeLocal(localCmd, remoteCmd, logCb, onBytes),
     };
 
+    // Fast ssh2 path (see transferInViaSftp): pack once, upload the single
+    // archive via SFTP fastPut (concurrent). Falls back to the streaming tar
+    // pipe over the exec channel only if SFTP itself fails.
+    const sftpThenPipe = async () => {
+      try {
+        await this.transferInViaSftp(localPath, remotePath, onLog, options);
+      } catch (err) {
+        onLog?.(
+          logEntry(
+            `SFTP upload failed (${safeErrorMessage(err)}); falling back to the tar stream over the existing connection.`,
+            "warn",
+          ),
+        );
+        await transferRemoteDirectoryWithTar(localPath, remotePath, deps, onLog, options);
+      }
+    };
+
+    // Explicit "tar" mode = "don't use the system-ssh rsync path". Honor that,
+    // but still prefer the fast SFTP upload over the slow exec-channel stream.
     if (options?.mode === "tar") {
-      // The tar helper itself emits a "Streaming X MB…" line once it has
-      // sized the directory, plus per-checkpoint progress and a final
-      // throughput line. No need for a redundant pre-log here.
-      await transferRemoteDirectoryWithTar(localPath, remotePath, deps, onLog, options);
+      await sftpThenPipe();
       return;
     }
 
@@ -676,26 +737,125 @@ export class SshExecutor implements CommandExecutor {
         await transferRemoteDirectoryWithRsync(localPath, remotePath, deps, onLog, options);
         return;
       } catch (err) {
-        // rsync uses a SEPARATE /usr/bin/ssh subprocess with its own auth
-        // path - when the VPS's pubkey/password state desyncs (perms
-        // changed, fail2ban ban, authorized_keys edited), rsync fails
-        // even though openship's own ssh2 connection still works.
-        //
-        // Fall back to tar-piped-through-pipeLocal, which RIDES the
-        // existing ssh2 connection - same auth as every other openship
-        // command. If steps 1-N succeeded, this will succeed too.
+        // rsync uses a SEPARATE /usr/bin/ssh subprocess with its own auth path
+        // - when the VPS's pubkey/password state desyncs (perms changed,
+        // fail2ban ban, authorized_keys edited), rsync fails even though
+        // openship's own ssh2 connection still works. Fall back to the SFTP
+        // upload, which RIDES the existing ssh2 connection (same auth) and is
+        // far faster than the exec-channel tar stream.
         const message = safeErrorMessage(err);
         onLog?.(
           logEntry(
-            `rsync transfer failed (${message}); falling back to tar stream through the existing SSH connection.`,
+            `rsync transfer failed (${message}); falling back to a single-archive SFTP upload.`,
             "warn",
           ),
         );
       }
     } else {
-      onLog?.(logEntry(`rsync unavailable (${rsync.reason}); falling back to tar stream transfer.`, "warn"));
+      // rsync needs sshpass for password servers (absent on e.g. macOS desktop);
+      // the SFTP upload has no such dependency and still gets concurrency.
+      onLog?.(logEntry(`rsync unavailable (${rsync.reason}); using a single-archive SFTP upload.`, "warn"));
     }
 
-    await transferRemoteDirectoryWithTar(localPath, remotePath, deps, onLog, options);
+    await sftpThenPipe();
+  }
+
+  /**
+   * Fast ssh2 transfer: pack the source into ONE gzipped archive locally, upload
+   * it with SFTP `fastPut` (concurrent chunks fill the bandwidth-delay product —
+   * far faster than the single exec-channel tar stream on a latency-bound link),
+   * then extract on the remote. Works over password auth with no `sshpass`, and
+   * completes cleanly (no swallowed channel-close hang). Throws on failure so the
+   * caller can fall back to the exec-channel tar stream.
+   */
+  private async transferInViaSftp(
+    localPath: string,
+    remotePath: string,
+    onLog?: (log: LogEntry) => void,
+    options?: { excludes?: string[]; includes?: string[] },
+  ): Promise<void> {
+    const excludes = options?.excludes ?? [...TRANSFER_EXCLUDES];
+    const tarArgs = getTarCreateArgs(localPath, { excludes, includes: options?.includes });
+
+    const tmpLocalDir = await mkdtemp(join(tmpdir(), "openship-xfer-"));
+    const localArchive = join(tmpLocalDir, "context.tar.gz");
+    // Sibling of the destination dir so it lands on the same filesystem.
+    const remoteArchive = `${remotePath}.openship-xfer.tar.gz`;
+
+    try {
+      onLog?.(logEntry("Packing source into a single archive for a fast SFTP upload..."));
+      await this.runLocalTarToFile(tarArgs, localArchive);
+
+      const totalBytes = (await stat(localArchive)).size;
+      onLog?.(logEntry(`Uploading ${formatBytes(totalBytes)} archive via SFTP (concurrent)...`));
+
+      await this.exec(`mkdir -p ${sq(dirname(remoteArchive))}`);
+      await this.sftpFastPut(localArchive, remoteArchive, totalBytes, onLog);
+
+      await this.exec(
+        `mkdir -p ${sq(remotePath)} && tar xzf ${sq(remoteArchive)} -C ${sq(remotePath)} && rm -f ${sq(remoteArchive)}`,
+      );
+      onLog?.(logEntry(`Transferred ${formatBytes(totalBytes)} via SFTP and extracted on the server.`));
+    } finally {
+      await fsRm(tmpLocalDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** Run `tar` locally, streaming its archive to `outFile`. Resolves when tar
+   *  exits 0 AND the file is fully flushed; rejects with tar's stderr otherwise. */
+  private runLocalTarToFile(tarArgs: string[], outFile: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const tar = spawn("tar", tarArgs, { stdio: ["ignore", "pipe", "pipe"], env: getTarCreateEnv() });
+      const out = createWriteStream(outFile);
+      let stderr = "";
+      let tarCode: number | null = null;
+      let tarClosed = false;
+      let outClosed = false;
+      const settle = () => {
+        if (!tarClosed || !outClosed) return;
+        if (tarCode === 0) resolve();
+        else reject(new Error(`tar failed (exit ${tarCode})${stderr.trim() ? `: ${stderr.trim().slice(-300)}` : ""}`));
+      };
+      tar.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+      tar.on("error", reject);
+      out.on("error", reject);
+      tar.stdout.pipe(out);
+      tar.on("close", (code) => { tarCode = code ?? 1; tarClosed = true; settle(); });
+      out.on("finish", () => { outClosed = true; settle(); });
+    });
+  }
+
+  /** SFTP fastPut with concurrency + a throttled progress heartbeat. */
+  private async sftpFastPut(
+    localArchive: string,
+    remoteArchive: string,
+    totalBytes: number,
+    onLog?: (log: LogEntry) => void,
+  ): Promise<void> {
+    const sftp = await this.sftp();
+    const startedAt = Date.now();
+    let lastReportedAt = startedAt;
+    await new Promise<void>((resolve, reject) => {
+      sftp.fastPut(
+        localArchive,
+        remoteArchive,
+        {
+          concurrency: 16,
+          chunkSize: 32768,
+          step: (transferred: number) => {
+            const now = Date.now();
+            if (now - lastReportedAt < 2500) return;
+            lastReportedAt = now;
+            const elapsed = (now - startedAt) / 1000;
+            const mbps = elapsed > 0 ? transferred / 1024 / 1024 / elapsed : 0;
+            const pct = totalBytes > 0 ? Math.min(Math.floor((transferred / totalBytes) * 100), 100) : 0;
+            onLog?.(
+              logEntry(`  ~${pct}% · ${formatBytes(transferred)} · ${mbps.toFixed(1)} MB/s · ${elapsed.toFixed(0)}s`),
+            );
+          },
+        },
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
   }
 }
