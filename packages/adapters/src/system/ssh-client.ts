@@ -32,7 +32,11 @@ function toConnectConfig(config: SshConfig): ConnectConfig {
     agent: config.sshAgent,
     tryKeyboard: false,
     keepaliveInterval: 15_000,
-    keepaliveCountMax: 3,
+    // 10 (~150s) rather than 3 (45s): a small server pegged by a heavy
+    // `docker build` / `bun install` can briefly starve sshd of keepalive
+    // replies, and 45s was dropping the SSH channel mid-build (build failed with
+    // a bare "exited with code 1"). Still detects a truly-dead link within ~2.5m.
+    keepaliveCountMax: 10,
   };
 }
 

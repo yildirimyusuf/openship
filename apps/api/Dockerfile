@@ -1,5 +1,7 @@
+# syntax=docker/dockerfile:1
 # ─── Build stage ────────────────────────────────────────
-FROM oven/bun:latest AS builder
+# Pin bun (was :latest — non-deterministic; drifted to 1.3.14) to .bun-version.
+FROM oven/bun:1.3.10 AS builder
 WORKDIR /app
 
 COPY package.json bun.lock pnpm-workspace.yaml ./
@@ -7,7 +9,15 @@ COPY tsconfig.base.json ./
 COPY packages/ ./packages/
 COPY apps/ ./apps/
 
-RUN bun install && cd apps/api && bun run build
+# The build died in "Resolving dependencies" — bun's network metadata resolution
+# for the whole monorepo, slow enough to trip the build's idle timeout.
+# --frozen-lockfile skips resolution entirely (installs straight from bun.lock),
+# and the BuildKit cache mount reuses bun's download store across builds so a
+# rebuild doesn't re-fetch the graph. (Cache mount needs BuildKit — Compose v2
+# enables it by default.)
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile \
+ && cd apps/api && bun run build
 
 # ─── Production stage ──────────────────────────────────
 FROM oven/bun:latest AS runner

@@ -106,7 +106,7 @@ const RESTART_POLICIES: Record<string, { Name: string; MaximumRetryCount: number
   no: { Name: "no", MaximumRetryCount: 0 },
 };
 
-const DOCKER_BUILD_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const DOCKER_BUILD_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 function resolveRestartPolicy(policy?: string) {
   return RESTART_POLICIES[policy ?? "always"] ?? RESTART_POLICIES.always;
@@ -880,7 +880,7 @@ export class DockerRuntime implements RuntimeAdapter {
 
         idleTimer = setTimeout(() => {
           fail(new Error(
-            "Docker build produced no output for 15 minutes. This usually means the remote server cannot reach the package registry, has broken DNS, or the Docker daemon stalled during the build.",
+            "Docker build produced no output for 30 minutes. This usually means the remote server cannot reach the package registry, has broken DNS, or the Docker daemon stalled during the build.",
           ));
         }, DOCKER_BUILD_IDLE_TIMEOUT_MS);
         if ((idleTimer as any).unref) (idleTimer as any).unref();
