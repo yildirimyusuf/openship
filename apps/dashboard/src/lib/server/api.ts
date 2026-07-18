@@ -120,15 +120,12 @@ function getServerApiBaseUrl(requestHeaders: Headers): string {
   // Desktop: the API runs on a dynamic port Electron injects here. Wins over
   // the header→table fallback (which can't know a dynamic port).
   const localOverride = process.env.OPENSHIP_LOCAL_API_URL?.replace(/\/+$/, "");
+  const internal = process.env.INTERNAL_API_URL?.replace(/\/+$/, "");
   if (localOverride) {
     origin = localOverride;
-  } else if (process.env.NEXT_PUBLIC_API_PROXY === "true") {
-    const internal = process.env.INTERNAL_API_URL;
-    if (internal) {
-      origin = internal.replace(/\/+$/, "");
-    } else {
-      origin = getApiOrigin(getRequestOriginFromHeaders(requestHeaders));
-    }
+  } else if (internal) {
+    // SSR-only override; the public origin used by the browser may not resolve from here (e.g. Docker service DNS).
+    origin = internal;
   } else {
     origin = getApiOrigin(getRequestOriginFromHeaders(requestHeaders));
   }

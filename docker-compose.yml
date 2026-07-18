@@ -102,6 +102,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3001"
+      INTERNAL_API_URL: http://api:4000
     depends_on:
       api:
         condition: service_healthy
