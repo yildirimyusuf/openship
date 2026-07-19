@@ -498,6 +498,10 @@ const openAttachment = async (attachment: {
       popup.focus();
       // Clean up the URL after a short delay to ensure the browser has time to load it
       setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    } else {
+      // Popup was blocked: nothing will ever load the URL, so revoke it now
+      // instead of leaking the blob until the tab closes.
+      window.URL.revokeObjectURL(url);
     }
   } catch (error) {
     console.error('Error opening attachment:', error);
