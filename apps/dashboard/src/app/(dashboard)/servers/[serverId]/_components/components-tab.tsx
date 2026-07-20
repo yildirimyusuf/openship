@@ -38,9 +38,9 @@ function HealthRow({
     <div className="flex items-center gap-3 py-2.5 px-3 rounded-lg hover:bg-muted/30 transition-colors">
       <div className="shrink-0">
         {component.healthy ? (
-          <CheckCircle2 className="size-5 text-emerald-500" />
+          <CheckCircle2 className="size-5 text-success" />
         ) : (
-          <XCircle className="size-5 text-orange-500" />
+          <XCircle className="size-5 text-warning" />
         )}
       </div>
       <div className="flex-1 min-w-0">
@@ -61,8 +61,8 @@ function HealthRow({
       <div
         className={`text-xs font-medium px-2.5 py-1 rounded-full ${
           component.healthy
-            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-            : "bg-orange-500/10 text-orange-600 dark:text-orange-400"
+            ? "bg-success-bg text-success"
+            : "bg-warning-bg text-warning"
         }`}
       >
         {component.healthy ? "Healthy" : "Unhealthy"}
@@ -90,7 +90,7 @@ function HealthRow({
               onClick={() => onRemoveAction(component)}
               disabled={removeDisabled}
               title={component.removeBlockedReason}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-red-500/30 hover:bg-red-500/5 transition-colors text-red-600 dark:text-red-400 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-danger-border hover:bg-danger-bg transition-colors text-danger disabled:opacity-50"
             >
               {running ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -176,8 +176,8 @@ export function ComponentsTab({
       {/* Health checks card */}
       <div className="bg-card rounded-2xl border border-border/50">
         <div className="flex items-center gap-3 px-5 py-4 border-b border-border/50">
-          <div className="w-9 h-9 bg-emerald-500/10 rounded-xl flex items-center justify-center">
-            <Shield className="size-[18px] text-emerald-500" />
+          <div className="w-9 h-9 bg-success-bg rounded-xl flex items-center justify-center">
+            <Shield className="size-[18px] text-success" />
           </div>
           <div className="flex-1">
             <h2 className="font-semibold text-foreground text-[15px]">
@@ -221,8 +221,8 @@ export function ComponentsTab({
 
         <div className="p-5 space-y-0.5">
           {checkError && (
-            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 mb-3">
-              <p className="text-xs text-red-600 dark:text-red-400">
+            <div className="rounded-lg border border-danger-border bg-danger-bg p-3 mb-3">
+              <p className="text-xs text-danger">
                 {checkError}
               </p>
             </div>
@@ -287,16 +287,16 @@ export function ComponentsTab({
               className={`w-9 h-9 rounded-xl flex items-center justify-center ${
                 installDone
                   ? installFinalStatus === "completed"
-                    ? "bg-emerald-500/10"
-                    : "bg-red-500/10"
+                    ? "bg-success-bg"
+                    : "bg-danger-bg"
                   : "bg-primary/10"
               }`}
             >
               {installDone ? (
                 installFinalStatus === "completed" ? (
-                  <CheckCircle2 className="size-[18px] text-emerald-500" />
+                  <CheckCircle2 className="size-[18px] text-success" />
                 ) : (
-                  <XCircle className="size-[18px] text-red-500" />
+                  <XCircle className="size-[18px] text-danger" />
                 )
               ) : (
                 <Download className="size-[18px] text-primary" />
@@ -330,7 +330,7 @@ export function ComponentsTab({
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${
                     installDone && installFinalStatus === "failed"
-                      ? "bg-red-500"
+                      ? "bg-danger-solid"
                       : "bg-primary"
                   }`}
                   style={{
@@ -356,9 +356,9 @@ export function ComponentsTab({
                   {comp.status === "installing" || comp.status === "removing" ? (
                     <Loader2 className="size-3.5 text-primary animate-spin" />
                   ) : comp.status === "installed" || comp.status === "removed" ? (
-                    <CheckCircle2 className="size-3.5 text-emerald-500" />
+                    <CheckCircle2 className="size-3.5 text-success" />
                   ) : comp.status === "failed" ? (
-                    <XCircle className="size-3.5 text-red-500" />
+                    <XCircle className="size-3.5 text-danger" />
                   ) : (
                     <div className="size-3.5 rounded-full border-2 border-border/50" />
                   )}
@@ -371,9 +371,9 @@ export function ComponentsTab({
                     comp.status === "installing" || comp.status === "removing"
                       ? "text-primary"
                       : comp.status === "installed" || comp.status === "removed"
-                        ? "text-emerald-500"
+                        ? "text-success"
                         : comp.status === "failed"
-                          ? "text-red-500"
+                          ? "text-danger"
                           : "text-muted-foreground"
                   }`}
                 >
@@ -419,9 +419,9 @@ export function ComponentsTab({
                         <span
                           className={`shrink-0 w-[38px] text-center text-[10px] font-semibold uppercase rounded px-1 py-px ${
                             entry.level === "error"
-                              ? "text-red-500 bg-red-500/10"
+                              ? "text-danger bg-danger-bg"
                               : entry.level === "warn"
-                                ? "text-yellow-500 bg-yellow-500/10"
+                                ? "text-warning bg-warning-bg"
                                 : "text-muted-foreground/50 bg-muted/50"
                           }`}
                         >
@@ -430,9 +430,9 @@ export function ComponentsTab({
                         <span
                           className={`flex-1 min-w-0 break-all ${
                             entry.level === "error"
-                              ? "text-red-500"
+                              ? "text-danger"
                               : entry.level === "warn"
-                                ? "text-yellow-500"
+                                ? "text-warning"
                                 : "text-foreground/70"
                           }`}
                         >

@@ -402,14 +402,14 @@ export function ServerForm({ server, onSaved, submitLabel }: ServerFormProps) {
             {testing ? (
               <Loader2 className="size-4 animate-spin" />
             ) : testResult?.ok ? (
-              <Check className="size-4 text-emerald-500" />
+              <Check className="size-4 text-success" />
             ) : (
               <Network className="size-4" />
             )}
             {testing ? t.servers.form.testing : testResult?.ok ? t.servers.form.connected : t.servers.form.testConnection}
           </button>
           {testResult && !testResult.ok && (
-            <p className="text-xs text-red-500 text-center">{testResult.message}</p>
+            <p className="text-xs text-danger text-center">{testResult.message}</p>
           )}
           <button
             onClick={handleSave}

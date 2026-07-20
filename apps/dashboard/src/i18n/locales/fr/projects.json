@@ -185,7 +185,8 @@
     "topPaths": "Principaux chemins",
     "requestCount": "{count} req",
     "statusActive": "Actif",
-    "statusOff": "Désactivé"
+    "statusOff": "Désactivé",
+    "server": "Serveur"
   },
   "stats": {
     "serverRequests": "Requêtes serveur",
@@ -266,6 +267,10 @@
     "newCommitTitle": "Nouveau commit disponible",
     "newCommitOn": "sur",
     "newCommitDeployedOn": "— vous êtes déployé sur",
+    "newVersionTitle": "Nouvelle version disponible",
+    "newVersionAvailable": "Une version plus récente est disponible :",
+    "newVersionDeployed": "— vous êtes déployé sur",
+    "deployVersion": "Déployer la nouvelle version",
     "deploying": "Déploiement…",
     "redeployLatest": "Redéployer la dernière version",
     "deployLatestTitle": "Déployer les derniers changements",

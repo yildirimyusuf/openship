@@ -375,7 +375,7 @@ export function AddServerModal({ onCancel, onCreated }: AddServerModalProps) {
           {testing ? (
             <Loader2 className="size-4 animate-spin" />
           ) : testOk ? (
-            <Check className="size-4 text-emerald-500" />
+            <Check className="size-4 text-success" />
           ) : (
             <Network className="size-4" />
           )}

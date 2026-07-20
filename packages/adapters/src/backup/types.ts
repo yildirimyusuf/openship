@@ -136,6 +136,17 @@ export interface BackupExecutor {
     opts?: ReceiveStreamOpts,
   ): Promise<{ bytesWritten: number }>;
 
+  /** Same-daemon source→target copy in a single helper (no stream/SSH hop).
+   *  Optional — only the docker executor implements it; the transfer core
+   *  falls back to streamPath→receiveStream when it's absent. */
+  copyVolumeLocal?(
+    srcService: ServiceHandle,
+    srcSourceId: string,
+    dstService: ServiceHandle,
+    dstSourceId: string,
+    opts?: { clearTarget?: boolean },
+  ): Promise<{ bytesWritten: number }>;
+
   /** Run a command inside the service with `body` piped to its stdin.
    *  Returns when the command exits. Used by DB-aware producers to
    *  stream dump bytes into `pg_restore` / `mysql` / `redis-cli` etc.

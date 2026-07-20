@@ -487,7 +487,8 @@
       "expired": "Expired",
       "error": "Error",
       "inactive": "Inactive",
-      "external": "External TLS"
+      "external": "External TLS",
+      "manual": "Manual cert"
     },
     "typeCustom": "Custom domain",
     "typeFree": "Free subdomain",
@@ -529,11 +530,15 @@
       "customPlaceholder": "yourdomain.com",
       "defaultAppName": "my-app",
       "mapsToPort": "Maps to port",
+      "servesPath": "Serves path",
+      "servesPathHint": "Requests to this domain are served from this path in your build output.",
+      "servesPathRedeploy": "New paths take effect on your next deploy.",
       "includeWww": "Include www",
       "includeWwwDesc": "Also generate records for www.{domain}",
       "includeWwwFallback": "yourdomain.com",
       "externalIngress": "External ingress & TLS",
       "externalIngressDesc": "TLS terminates upstream (Cloudflare Tunnel, load balancer). Verify by TXT only — the domain need not point at this server, and we won't issue a certificate.",
+      "noWww": "Enter the domain without \"www.\" — turn on \"Include www\" below to add it.",
       "adding": "Adding...",
       "submit": "Add domain"
     },
@@ -546,6 +551,24 @@
       "verifying": "Verifying...",
       "verify": "Verify {hostname}",
       "copy": "Copy"
+    },
+    "records": {
+      "toggle": "DNS records",
+      "hint": "Add these at your DNS provider, then click Verify.",
+      "loading": "Loading records…",
+      "none": "No records to add for this domain."
+    },
+    "verifyMissing": {
+      "both": "Neither the CNAME nor the TXT record is resolving yet — add the records below, wait for DNS to propagate, then Verify.",
+      "cname": "The CNAME record isn't resolving yet — add it below, wait for DNS to propagate, then Verify.",
+      "txt": "The TXT verification record isn't resolving yet — add it below, wait for DNS to propagate, then Verify."
+    },
+    "portHint": {
+      "body": "Nothing responded on port {port} — requests may 502 until the app listens there.",
+      "bodyService": "Service \"{service}\": nothing responded on port {port} — requests may 502 until it listens there."
+    },
+    "outputHint": {
+      "body": "No build output found at {path} — check your Output Directory and redeploy."
     },
     "overview": {
       "primary": "Primary",
@@ -597,7 +620,19 @@
       "renewing": "Renewing...",
       "renewSsl": "Renew SSL",
       "rechecking": "Rechecking...",
-      "recheckSsl": "Recheck SSL"
+      "recheckSsl": "Recheck SSL",
+      "uploadCert": "Upload certificate"
+    },
+    "certUpload": {
+      "title": "Upload certificate",
+      "desc": "Serve TLS from your own certificate (bring-your-own or Cloudflare Origin CA) instead of Let's Encrypt. Use this when an upstream proxy fronts this domain and the origin still needs a real cert (Cloudflare Full-strict). Certbot is disabled for this domain once a certificate is uploaded — renew by uploading a new one.",
+      "certLabel": "Certificate (fullchain PEM)",
+      "certPlaceholder": "-----BEGIN CERTIFICATE-----",
+      "keyLabel": "Private key (PEM)",
+      "keyPlaceholder": "-----BEGIN PRIVATE KEY-----",
+      "submit": "Install certificate",
+      "submitting": "Installing...",
+      "close": "Cancel"
     },
     "toast": {
       "enterPort": "Enter the port this domain should route to (1–65535).",
@@ -618,6 +653,8 @@
       "sslVerified": "SSL verified for {hostname}.",
       "sslNoCert": "No valid certificate found for {hostname} yet. If you just deployed, give Let's Encrypt a moment, then recheck.",
       "sslRecheckFailed": "Failed to recheck SSL for {hostname}.",
+      "certUploaded": "Certificate installed for {hostname}.",
+      "certUploadFailed": "Failed to install certificate for {hostname}.",
       "completeEndpoints": "Complete every domain and mapped port before saving",
       "domainsTitle": "Domains",
       "routingUpdated": "Domain routing updated",

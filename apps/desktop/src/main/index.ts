@@ -236,7 +236,11 @@ function createWindow() {
     // traffic lights inlaid top-left. The dashboard reserves top-left space +
     // a drag region for them (see the `is-desktop` handling in the web app).
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    trafficLightPosition: { x: 16, y: 18 },
+    // Inset the traffic lights a touch further down/right so they sit inside the
+    // window's rounded content area rather than hugging the corner. Kept in sync
+    // with the dashboard's `--titlebar-h` reserved strip so they never overhang
+    // page content.
+    trafficLightPosition: { x: 22, y: 22 },
     // Match the OS appearance so there's no wrong-theme flash while the dashboard
     // loads (the web UI defaults to "system" in desktop). Dark bg is the app's
     // --th-bg-page dark value (#000000); light is #ffffff.

@@ -27,7 +27,8 @@ import type {
   MappedAccount,
   RepositoryDetail,
 } from "./github.types";
-import { env, runtimeTarget } from "../../config/env";
+import { env } from "../../config/env";
+import { resolveApiPublicUrl, sharedWebhookUrl, domainWebhookUrl } from "../../lib/public-url";
 
 export const GITHUB_DEPLOY_WEBHOOK_EVENTS = ["push"] as const;
 const MAX_FALLBACK_TREE_ENTRIES = 5000;
@@ -322,6 +323,46 @@ export async function deleteRepository(
     ctx,
     owner,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    method: "DELETE",
+  });
+}
+
+// ─── Deploy keys ───────────────────────────────────────────────────────────────
+
+/**
+ * Register a read-only GitHub deploy key on a repo (`POST /repos/{o}/{r}/keys`).
+ * Requires repo Administration on the resolved token — callers surface a 403 as
+ * "grant the App Administration permission or use a repo-admin PAT". Returns the
+ * GitHub key id (stored for later revocation).
+ */
+export async function createDeployKey(
+  ctx: RequestContext,
+  owner: string,
+  repo: string,
+  title: string,
+  publicKey: string,
+  readOnly = true,
+): Promise<{ id: number }> {
+  return githubFetch<{ id: number }>({
+    ctx,
+    owner,
+    url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/keys`,
+    method: "POST",
+    params: { title, key: publicKey, read_only: readOnly },
+  });
+}
+
+/** Delete a deploy key by its GitHub id (`DELETE /repos/{o}/{r}/keys/{id}`). */
+export async function revokeDeployKey(
+  ctx: RequestContext,
+  owner: string,
+  repo: string,
+  keyId: number,
+): Promise<void> {
+  await githubFetch({
+    ctx,
+    owner,
+    url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/keys/${keyId}`,
     method: "DELETE",
   });
 }
@@ -732,8 +773,11 @@ export type WebhookStrategy = "app" | "domain" | "repo" | "none";
 export function getWebhookStrategy(): WebhookStrategy {
   if (getGitHubAuthMode() === "app") return "app";
 
-  // For non-app modes, check if the URL is publicly reachable
-  const url = runtimeTarget.api;
+  // For non-app modes, check if the URL is publicly reachable. Uses the
+  // resolved PUBLIC url (OPENSHIP_PUBLIC_URL via the same-origin proxy) so a
+  // `--public-url` VPS gets "repo" instead of "none" — the localhost fallback
+  // is only hit when no public URL is configured.
+  const url = resolveApiPublicUrl();
   if (isLocalUrl(url)) return "none";
   return "repo";
 }
@@ -781,7 +825,7 @@ export async function getAvailableStrategies(
   // Domain is always available if verified domains exist (handled by UI)
   available.push("domain");
 
-  if (!isLocalUrl(runtimeTarget.api)) {
+  if (!isLocalUrl(resolveApiPublicUrl())) {
     available.push("repo");
   }
 
@@ -925,7 +969,7 @@ export async function registerWebhook(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  webhookUrl = `${runtimeTarget.api}/api/webhooks/github`,
+  webhookUrl = sharedWebhookUrl(),
   opts: { projectId?: string } = {},
 ): Promise<{ hookId: number | null; events: string[] }> {
   // Per-project secret takes precedence; env stays the back-compat
@@ -1005,7 +1049,12 @@ export async function rotateProjectWebhookSecret(
   }
 
   const fresh = mintWebhookSecret();
-  const webhookUrl = `${runtimeTarget.api}/api/webhooks/github`;
+  // Preserve the hook's delivery URL for its strategy — a domain-strategy hook
+  // must keep pointing at the project's `/_openship/hooks/` vhook, NOT get
+  // rewritten to the shared endpoint (which previously broke delivery on rotate).
+  const webhookUrl = project.webhookDomain
+    ? domainWebhookUrl(project.webhookDomain)
+    : sharedWebhookUrl();
   await updateWebhook(ctx, project.gitOwner, project.gitRepo, project.webhookId, {
     active: true,
     events: [...GITHUB_DEPLOY_WEBHOOK_EVENTS],

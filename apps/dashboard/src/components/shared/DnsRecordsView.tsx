@@ -160,7 +160,7 @@ function DnsRecordField({
         title={t.widgets.shared.dnsRecords.copy}
       >
         {copied ? (
-          <Check className="size-3.5 text-emerald-500" />
+          <Check className="size-3.5 text-success" />
         ) : (
           <Copy className="size-3.5" />
         )}

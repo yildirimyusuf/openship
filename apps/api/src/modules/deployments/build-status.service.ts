@@ -230,6 +230,10 @@ export async function getBuildSessionStatus(deploymentId: string) {
         }
       : null,
     previousActiveDeploymentId: snapshot?.previousActiveDeploymentId ?? null,
+    // Advisory port-check results + dismissed targets, re-hydrated on refresh so
+    // the "wrong port?" modal reappears (unless skipped) after a reload.
+    portCheck: snapshot?.portCheck ?? null,
+    portCheckSkipped: snapshot?.portCheckSkipped ?? [],
     errorCode:
       dep.errorMessage?.includes("PORT_IN_USE") || dep.errorMessage?.includes("EADDRINUSE")
         ? "PORT_IN_USE"

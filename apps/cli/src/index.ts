@@ -41,6 +41,9 @@ import { installCommand } from "./commands/install";
 import { updateCommand } from "./commands/update";
 import { cacheCommand } from "./commands/cache";
 
+// Interactive setup (bare `openship`)
+import { runWizard } from "./commands/wizard";
+
 // Injected at build time by tsup (define). Always present in the built binary.
 declare const __CLI_VERSION__: string;
 
@@ -53,6 +56,10 @@ program
   .option("--json", "Machine-readable JSON output (stdout data only)")
   .hook("preAction", (thisCommand) => {
     if (thisCommand.opts().json) setJsonMode(true);
+  })
+  // Bare `openship` (no subcommand) → interactive setup/deploy wizard.
+  .action(async () => {
+    await runWizard();
   });
 
 // Run the platform / auth / workspace

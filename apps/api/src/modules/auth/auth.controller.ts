@@ -97,9 +97,13 @@ export async function getSession(c: Context) {
     // session lookup failed — fall through to zero-auth bootstrap below
   }
 
-  const { getAuthMode } = await import("../../lib/auth-mode");
-  const authMode = await getAuthMode();
-  if (authMode !== "none") {
+  // This endpoint MINTS an owner-privileged session, so it must pass the SAME
+  // zero-auth gate as authMiddleware — not just authMode===none. Without the
+  // kernel-peer loopback check + public/CLI refusals, a network peer reaching a
+  // desktop API bound to 0.0.0.0 could mint an admin session unauthenticated.
+  const { zeroAuthAllowed } = await import("../../middleware/zero-auth-guard");
+  const gate = await zeroAuthAllowed(c);
+  if (!gate.ok) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -143,9 +147,10 @@ export async function getSession(c: Context) {
  * the cookie, and reaches the dashboard.
  */
 export async function desktopLogin(c: Context) {
-  const { getAuthMode } = await import("../../lib/auth-mode");
-  const authMode = await getAuthMode();
-  if (authMode !== "none") {
+  // Same mint gate as getSession — loopback-only zero-auth, never remote.
+  const { zeroAuthAllowed } = await import("../../middleware/zero-auth-guard");
+  const gate = await zeroAuthAllowed(c);
+  if (!gate.ok) {
     return c.redirect(`${localDashboardUrl}/login`);
   }
 

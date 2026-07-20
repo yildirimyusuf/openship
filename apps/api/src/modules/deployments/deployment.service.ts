@@ -271,6 +271,30 @@ export async function keepDeployment(
   };
 }
 
+/**
+ * Dismiss a port-check advisory. Appends `target` (the exposed port for a
+ * single-app, or the service id for a compose service) to `meta.portCheckSkipped`
+ * so the dashboard won't re-raise that advisory after a refresh. Advisory-only —
+ * never changes deployment status.
+ */
+export async function skipPortCheck(
+  deploymentId: string,
+  organizationId: string,
+  target: number | string,
+) {
+  const dep = await getDeployment(deploymentId, organizationId);
+  const meta = (dep.meta as Record<string, unknown> | null) ?? {};
+  const existing = Array.isArray(meta.portCheckSkipped)
+    ? (meta.portCheckSkipped as (number | string)[])
+    : [];
+  if (!existing.includes(target)) {
+    await repos.deployment.updateStatus(deploymentId, dep.status, {
+      meta: { ...meta, portCheckSkipped: [...existing, target] },
+    });
+  }
+  return { success: true };
+}
+
 export async function getDeploymentLogs(
   deploymentId: string,
   organizationId: string,

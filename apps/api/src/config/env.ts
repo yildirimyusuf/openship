@@ -58,6 +58,37 @@ const envSchema = z.object({
    */
   OPENSHIP_LOCAL_DASHBOARD_URL: z.string().optional(),
 
+  /**
+   * Set when this instance is served on a PUBLIC URL (e.g. `openship up
+   * --public-url https://ops.example.com` on a VPS). Two security effects:
+   *   - zero-auth is refused outright (a network-exposed control plane must
+   *     require login — the loopback guard is meaningless once a same-box
+   *     reverse proxy forwards remote traffic as loopback), and
+   *   - the default auth mode for a fresh install becomes "local".
+   * Presence, not the value, is the signal.
+   */
+  OPENSHIP_PUBLIC_URL: z.string().optional(),
+
+  /**
+   * Force login (no zero-auth) even in desktop DEPLOY_MODE. The CLI sets this
+   * for every `openship up` — a CLI-managed instance always requires a real
+   * admin account (created by the CLI's setup), unlike the Electron desktop app
+   * which keeps loopback zero-auth. Presence, not value, is the signal.
+   */
+  OPENSHIP_REQUIRE_AUTH: envBool("false"),
+
+  /**
+   * Managed edge: at boot, install OpenResty + certbot on THIS machine and
+   * route OPENSHIP_PUBLIC_URL's host → the local dashboard with a free Let's
+   * Encrypt cert (reusing the app-deploy route/SSL pipes). Set by the CLI
+   * wizard's "managed edge" path; off = bring-your-own reverse proxy.
+   */
+  OPENSHIP_MANAGED_EDGE: envBool("false"),
+  /** Loopback dashboard port the managed edge proxies to (defaults 3001). */
+  OPENSHIP_DASHBOARD_PORT: z.coerce.number().int().positive().catch(3001),
+  /** Let's Encrypt contact email for the managed edge (defaults to the admin). */
+  OPENSHIP_ACME_EMAIL: z.string().optional(),
+
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
   /**
@@ -379,6 +410,29 @@ if (env.BETTER_AUTH_COOKIE_DOMAIN) {
   validateCookieDomain(env.BETTER_AUTH_COOKIE_DOMAIN);
 }
 
+// ─── OPENSHIP_PUBLIC_URL validation ───────────────────────────────────────
+//
+// It's used to build absolute callback URLs handed to external services
+// (GitHub webhooks) and injected into trustedOrigins. A malformed value would
+// register a dead webhook and pollute the CORS allowlist with a junk origin, so
+// fail-loud at boot instead of silently later (mirrors the cookie-domain guard).
+if (env.OPENSHIP_PUBLIC_URL) {
+  const raw = env.OPENSHIP_PUBLIC_URL.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      `OPENSHIP_PUBLIC_URL="${raw}" is not a valid absolute URL (expected e.g. https://ops.example.com).`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `OPENSHIP_PUBLIC_URL must use http or https (got "${parsed.protocol}" in "${raw}").`,
+    );
+  }
+}
+
 function validateCookieDomain(raw: string): void {
   const value = raw.trim();
   if (!value.startsWith(".")) {
@@ -460,6 +514,10 @@ export const trustedOrigins = [
   ...new Set([
     runtimeTarget.dashboard,
     runtimeTarget.api,
+    // Public serving (openship up --public-url): the browser's origin is the
+    // operator's public URL, so it must be trusted for CORS, the origin guard,
+    // and Better Auth's login CSRF check — otherwise remote login is rejected.
+    ...(env.OPENSHIP_PUBLIC_URL ? [env.OPENSHIP_PUBLIC_URL.replace(/\/+$/, "")] : []),
     ...extraTrustedOrigins,
     ...(env.NODE_ENV === "production"
       ? []

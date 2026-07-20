@@ -31,7 +31,7 @@ import type {
 
 import { LocalExecutor, wrapLocalBuildCommand } from "../system/executor";
 import { execReliable } from "../system/remote-journal";
-import { STACKS, TRANSFER_EXCLUDES, safeErrorMessage, missingOutputDirectoryMessage, type StackId, type StackDefinition } from "@repo/core";
+import { STACKS, buildOutputTransferExcludes, safeErrorMessage, missingOutputDirectoryMessage, packageManagerEnsureCommand, type StackId, type StackDefinition } from "@repo/core";
 import { checkToolchainForStack, installTools } from "../toolchain";
 import type {
   RuntimeAdapter,
@@ -43,6 +43,7 @@ import type {
 import { BuildLogger, detectBuildKillHint, runBuildPipeline, sq, type BuildEnvironment } from "./build-pipeline";
 import { runLocalBuild } from "./local-build";
 import { transferLocalDirectory } from "./transfer";
+import { prepareStackOutput, resolveProjectDir } from "./stack-output";
 import type { ProcessSupervisor } from "./supervisor/types";
 import { detectSupervisor } from "./supervisor/detect";
 import { posix as pathPosix } from "node:path";
@@ -90,6 +91,7 @@ export class BareRuntime implements RuntimeAdapter {
     "streamLogs",
     "containerIp",
     "rollback",
+    "inContainerExec",
   ]);
 
   private readonly workDir: string;
@@ -123,6 +125,12 @@ export class BareRuntime implements RuntimeAdapter {
    *  backup subsystem's bare executor can stream commands over the same
    *  connection (mirrors how DockerRuntime exposes its client). */
   get commandExecutor(): CommandExecutor {
+    return this.executor;
+  }
+
+  /** A bare deployment is a host process, so "inside the instance" == the host.
+   *  The host executor already sees the process's listeners (shared netns). */
+  async inContainerExecutor(): Promise<CommandExecutor> {
     return this.executor;
   }
 
@@ -285,6 +293,10 @@ export class BareRuntime implements RuntimeAdapter {
     const remoteDir = this.buildDir(config.sessionId);
 
     const stackDef: StackDefinition | undefined = STACKS[config.stack as StackId];
+    // Set by transferOutput when a Next.js standalone bundle is detected — the
+    // build then dictates the start command (`node server.js`), overriding the
+    // snapshot's `next start`. Surfaced on the BuildResult below.
+    let standaloneStartCommand: string | undefined;
 
     let result: Awaited<ReturnType<typeof runLocalBuild>>;
     try {
@@ -305,6 +317,26 @@ export class BareRuntime implements RuntimeAdapter {
           await this.executor.rm(remoteDir);
           await this.executor.mkdir(remoteDir);
 
+          // Self-contained build output (detect-only): if this stack's build
+          // emitted a wholesale-shippable bundle (e.g. Next's `output:'standalone'`),
+          // ship it as-is — traced node_modules included — and skip the on-target
+          // install. Absent → falls through to host mode.
+          const selfContained = await prepareStackOutput(
+            config.stack,
+            resolveProjectDir(buildDir, config.rootDirectory),
+          );
+          if (selfContained) {
+            log.log("Detected self-contained build output — shipping the bundle (no install on target).\n");
+            await transferLocalDirectory(
+              selfContained.bundleDir,
+              { kind: "executor", executor: this.executor, path: remoteDir },
+              log,
+              { excludes: [] }, // ship everything, incl. traced node_modules
+            );
+            standaloneStartCommand = selfContained.startCommand;
+            return;
+          }
+
           // Default ("auto") mode - rsync over system `ssh` first, tar
           // through ssh2 only as fallback. See transferFiles above for
           // the full rationale (system ssh ≫ Node ssh2 on the wire).
@@ -318,25 +350,32 @@ export class BareRuntime implements RuntimeAdapter {
               { includes: [...stackDef.productionPaths] },
             );
           } else {
-            // Runtime stacks (JS/TS, Python, etc.) - transfer everything except deps & caches
-            const excludes = [
-              ...TRANSFER_EXCLUDES,
-              ...(stackDef?.cacheDirs ?? []),
-            ];
+            // Runtime stacks (JS/TS, Python, …): ship the tracked source PLUS
+            // the build output, drop deps/caches. The build dir is a git clone,
+            // so packing uses git-truth — which omits the (gitignored) build
+            // output — hence `alsoInclude: [outputDirectory]` re-adds it there.
+            // `excludes` covers the no-git fallback (local-path/upload sources),
+            // where buildOutputTransferExcludes keeps the output by name.
             await transferLocalDirectory(
               buildDir,
               { kind: "executor", executor: this.executor, path: remoteDir },
               log,
-              { excludes },
+              {
+                excludes: buildOutputTransferExcludes(stackDef),
+                alsoInclude: stackDef?.outputDirectory ? [stackDef.outputDirectory] : undefined,
+              },
             );
           }
 
           // Install production dependencies on target if needed
           const installCmd = config.installCommand?.trim();
           if (installCmd) {
+            // Ensure the package manager exists before install (corepack for pnpm/yarn).
+            const pmEnsure = packageManagerEnsureCommand(config.packageManager);
+            const fullInstall = pmEnsure ? `${pmEnsure} && ${installCmd}` : installCmd;
             log.log("Installing production dependencies on target...\n");
             const { code } = await this.executor.streamExec(
-              `cd ${sq(remoteDir)} && ${installCmd}`,
+              `cd ${sq(remoteDir)} && ${fullInstall}`,
               log.callback,
             );
             if (code !== 0) {
@@ -363,6 +402,7 @@ export class BareRuntime implements RuntimeAdapter {
       imageRef: remoteDir,
       durationMs: result.durationMs,
       errorMessage: result.errorMessage,
+      startCommand: standaloneStartCommand,
     };
   }
 
@@ -400,6 +440,10 @@ export class BareRuntime implements RuntimeAdapter {
           await this.transferFiles(cfg.localPath, dir, plog);
         }
       },
+      // Out-of-band secret write (SSH key + known_hosts) — goes through the
+      // executor's file channel, never the streamed `exec`, so key bytes never
+      // reach the build log. Works for both local and SSH executors.
+      writeSecretFile: (p, content) => this.executor.writeFile(p, content),
     };
 
     const result = await runBuildPipeline(buildEnv, config, log);

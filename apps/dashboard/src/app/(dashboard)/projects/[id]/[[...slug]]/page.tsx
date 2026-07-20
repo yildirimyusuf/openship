@@ -23,6 +23,7 @@ import { LogsSettings } from "../components/LogsSettings";
 import { BackupSettings } from "../components/BackupSettings";
 import { Deployments } from "../components/Deployments";
 import { AdvancedSettings } from "../components/AdvancedSettings";
+import { RouteRules } from "../components/RouteRules";
 import { OverviewTab } from "../components/OverviewTab";
 import { ServicesTab } from "../components/ServicesTab";
 import { ProjectSidebar, ProjectMobileTabs } from "../components/ProjectSidebar";
@@ -604,7 +605,7 @@ const ProjectSettingsContent = () => {
       label: t.projects.help.contactSupport,
       icon: <HelpCircle className="w-4 h-4" />,
       onClick: () => {
-        window.open("https://oblien.com/support", "_blank");
+        window.open("https://openship.io/support", "_blank");
       },
     },
     {
@@ -612,7 +613,7 @@ const ProjectSettingsContent = () => {
       label: t.projects.help.reportIssue,
       icon: <Bug className="w-4 h-4" />,
       onClick: () => {
-        window.open("https://github.com/oblien/deployments/issues/new", "_blank");
+        window.open("https://github.com/oblien/openship/deployments/issues/new", "_blank");
       },
     },
     {
@@ -620,7 +621,7 @@ const ProjectSettingsContent = () => {
       label: t.projects.help.sendFeedback,
       icon: <MessageSquare className="w-4 h-4" />,
       onClick: () => {
-        window.open("https://oblien.com/feedback", "_blank");
+        window.open("https://openship.io/contact", "_blank");
       },
     },
     {
@@ -632,7 +633,7 @@ const ProjectSettingsContent = () => {
       label: t.projects.help.documentation,
       icon: <BookOpen className="w-4 h-4" />,
       onClick: () => {
-        window.open("https://oblien.com/docs", "_blank");
+        window.open("https://openship.io/docs", "_blank");
       },
     },
     {
@@ -640,7 +641,7 @@ const ProjectSettingsContent = () => {
       label: t.projects.help.joinCommunity,
       icon: <ExternalLink className="w-4 h-4" />,
       onClick: () => {
-        window.open("https://discord.gg/oblien", "_blank");
+        window.open("https://discord.gg/openship", "_blank");
       },
     },
   ];
@@ -666,7 +667,12 @@ const ProjectSettingsContent = () => {
       case "backup":
         return <BackupSettings />;
       case "advanced":
-        return <AdvancedSettings onDeleteProject={handleDeleteProject} />;
+        return (
+          <div className="space-y-5">
+            <RouteRules />
+            <AdvancedSettings onDeleteProject={handleDeleteProject} />
+          </div>
+        );
       default:
         return <OverviewTab />;
     }
@@ -770,6 +776,8 @@ const ProjectSettingsContent = () => {
             <span>/</span>
             <span className="text-foreground font-medium">{projectData.name || t.projects.detail.projectFallback}</span>
           </div>
+          {/* Logo intentionally omitted here — it lives in the DraftProjectView
+              hero card below; showing it in both duplicates it. */}
           <h1 className="text-2xl font-semibold text-foreground truncate">
             {projectData.name || t.projects.detail.projectFallback}
           </h1>

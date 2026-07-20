@@ -282,6 +282,38 @@
       "saveLabel": "Save access"
     },
     "confirmRemove": "Remove this member from the organization?",
+    "workspace": {
+      "deleteWorkspace": "Delete workspace",
+      "leaveWorkspace": "Leave workspace",
+      "deleteBody": "Permanently remove this workspace and everything in it.",
+      "leaveBody": "Leave this workspace — you'll need a new invite to return.",
+      "deleteConfirm": "Delete this workspace? Its projects, members, and settings are removed for everyone. This can't be undone.",
+      "leaveConfirm": "Leave this workspace? You'll lose access until you're invited again.",
+      "manage": {
+        "title": "Manage workspace",
+        "sectionBody": "Rename this workspace, pause its projects, or delete it.",
+        "nameLabel": "Workspace name",
+        "rename": "Rename",
+        "projects": "Projects ({count})",
+        "noProjects": "No projects in this workspace.",
+        "running": "Running",
+        "stopped": "Stopped",
+        "pauseTitle": "Pause everything",
+        "pauseBody": "Stop every project but keep the workspace — resume anytime.",
+        "pauseButton": "Stop all projects",
+        "deleteTitle": "Delete workspace",
+        "deleteBody": "Tears down all {count} projects (containers and routes) and removes the workspace. Volume data is left recoverable. Can't be undone.",
+        "confirmLabel": "Type “{name}” to confirm",
+        "deleting": "Deleting…",
+        "deletingProject": "Removing {name}…",
+        "deletingWorkspace": "Removing workspace…",
+        "toastRenamed": "Workspace renamed",
+        "toastRenameFailed": "Couldn't rename workspace",
+        "toastPaused": "Stopped {count} projects",
+        "toastPauseFailed": "Some projects couldn't be stopped",
+        "toastProjectFailed": "Couldn't remove {name}"
+      }
+    },
     "toast": {
       "teamNameRequired": "Team name is required",
       "teamCreated": "Team \"{name}\" created — switching now…",
@@ -291,7 +323,12 @@
       "removeFailed": "Failed to remove",
       "cancelFailed": "Failed to cancel",
       "accessUpdated": "Access updated",
-      "loadGrantsFailed": "Failed to load grants"
+      "loadGrantsFailed": "Failed to load grants",
+      "deleteFailed": "Couldn't delete workspace",
+      "deleteBillingActive": "Cancel this workspace's active subscription before deleting it.",
+      "deleted": "Workspace deleted",
+      "leaveFailed": "Couldn't leave workspace",
+      "left": "Left workspace"
     }
   },
   "inviteMember": {
@@ -318,17 +355,19 @@
     "toast": {
       "failedSend": "Failed to send invite",
       "invitationSent": "Invitation sent to {email}",
+      "personalOrgBlocked": "Personal workspaces can't invite members. Create a team organization first, then send invitations.",
       "updateMailSourceFailed": "Failed to update mail source"
     }
   },
   "teamWorkspace": {
-    "title": "Team workspace",
-    "description": "Move this instance into multi-user mode.",
-    "body": "Right now this instance is single-user — only you can sign in. When you're ready to add teammates, migrate the deployment to a shared location: your own server, Openship Cloud, or expose this machine via a tunnel.",
+    "title": "Invite your team",
+    "description": "Move this workspace somewhere your teammates can reach.",
+    "body": "This workspace lives only on this computer, so teammates can't reach it and invites are off. Move it to a shared location — your own server, Openship Cloud, or a tunnel — to start inviting people.",
     "currentMode": "Current mode",
     "singleUserLocal": "Single-user (local)",
     "migrate": "Migrate",
-    "ownerOnlyTitle": "Only the workspace owner can migrate"
+    "ownerOnlyTitle": "Only the workspace owner can migrate",
+    "comingSoon": "Linking directly to a remote instance is coming soon."
   },
   "cloud": {
     "checking": "Checking…",

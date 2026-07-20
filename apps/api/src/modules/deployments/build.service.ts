@@ -23,10 +23,12 @@ import {
   STACKS,
   safeErrorMessage,
   getRuntimeImage,
+  isReleaseProvider,
   type StackId,
   type DeployTarget,
   type BuildStrategy,
   type StackDefinition,
+  type ReleaseSource,
 } from "@repo/core";
 import type {
   LogEntry,
@@ -42,6 +44,7 @@ import { resolveSmartRoute } from "./smart-route";
 import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
 import { type RequestContext } from "../../lib/request-context";
+import { type PortCheckResult } from "../../lib/deployment-runtime";
 import * as sessionManager from "./session-manager";
 import {
   collectDeploymentManifest,
@@ -62,6 +65,7 @@ import {
   syncProjectRouteState,
 } from "../domains/project-route.service";
 import { kickoffBuild, resolveServicePipelineMode } from "./build-pipeline";
+import { resolveReleaseDist, resolveLatestVersion, readApiVersion } from "../../lib/release-dist";
 
 function throwPreflightFailure(preflight: PreflightResult): never {
   const failedChecks = preflight.checks.filter((check) => check.status === "fail");
@@ -148,6 +152,17 @@ export interface DeploymentConfigSnapshot {
   hasBuild: boolean;
   /** Absolute path to a local project directory (alternative to repoUrl) */
   localPath?: string;
+  /**
+   * Release/dist source (gitProvider === "release"). Resolved by
+   * `applyReleaseSourceToSnapshot` in the async entry points: the semver
+   * version deployed, the asset it came from, and the source repo — captured
+   * so history/rollback and the drift banner have a stable anchor. `localPath`
+   * above points at the resolved dist dir and `buildCommand` is emptied
+   * (deploy-only, no build).
+   */
+  releaseVersion?: string;
+  releaseAsset?: string;
+  releaseRepo?: string;
   /** Build strategy: "server" (build in workspace) or "local" (build on host) */
   buildStrategy?: BuildStrategy;
   /**
@@ -194,6 +209,16 @@ export interface DeploymentConfigSnapshot {
    * Persisted so it survives a page refresh, not just the live SSE event.
    */
   deployWarning?: string;
+  /**
+   * Advisory post-deploy port-probe results (one per exposed port/service).
+   * Point-in-time; drives the dashboard's skippable "wrong port?" modal.
+   */
+  portCheck?: PortCheckResult[];
+  /**
+   * Ports (single-app) / service ids (compose) the operator dismissed from the
+   * port advisory — so it doesn't re-nag after a refresh.
+   */
+  portCheckSkipped?: (number | string)[];
   previousActiveDeploymentId?: string;
   /**
    * Smart per-service target list. When set, only these service ids
@@ -287,6 +312,64 @@ export function buildConfigSnapshot(
     // re-defaulting. The wizard's per-deploy override still wins when passed.
     runtimeMode: toRuntimeMode(project.runtimeMode),
   };
+}
+
+/**
+ * Resolve a release/dist-source project (`gitProvider === "release"`) into a
+ * deployable snapshot: pick the version, download/locate the prebuilt dist,
+ * and point the snapshot's `localPath` at it with the build step emptied. The
+ * rest of the pipeline then treats it exactly like a `localPath` no-build
+ * deploy — no bespoke pipeline. `buildConfigSnapshot` is sync/pure, so this
+ * async resolution runs in the deploy entry points (requestBuildAccess /
+ * triggerDeployment) after the snapshot is built, mirroring `startWebmailDeploy`.
+ *
+ * Version precedence: explicit `opts.version` (webhook release tag / redeploy
+ * pin) → `releaseSource.pinnedVersion` → newest advertised (github latest tag
+ * or `versionUrl`) → the API's own version (mono-version fallback).
+ *
+ * Mutates `snapshot` in place and returns the resolved semver (no leading "v").
+ */
+export async function applyReleaseSourceToSnapshot(
+  project: Project,
+  snapshot: DeploymentConfigSnapshot,
+  opts?: { version?: string },
+): Promise<string> {
+  const source = (project.releaseSource as ReleaseSource | null) ?? null;
+  if (!source) {
+    throw new AppError(
+      `Project ${project.id} has gitProvider "release" but no releaseSource configured.`,
+      400,
+      "RELEASE_SOURCE_MISSING",
+    );
+  }
+
+  const version =
+    stripV(opts?.version) ||
+    stripV(source.pinnedVersion) ||
+    (await resolveLatestVersion(source)) ||
+    readApiVersion();
+
+  const result = await resolveReleaseDist({
+    name: project.slug || project.id,
+    version,
+    source,
+  });
+
+  // Deploy the prebuilt dist as-is: point localPath at it, drop any git repo,
+  // and never build. Install still runs iff the project keeps hasBuild=true
+  // (install-only apps like webmail); a pure static/binary dist sets hasBuild=false.
+  snapshot.localPath = result.dir;
+  snapshot.repoUrl = "";
+  snapshot.buildCommand = "";
+  snapshot.releaseVersion = result.version;
+  snapshot.releaseAsset = result.asset;
+  snapshot.releaseRepo = source.mode === "github" ? source.repo : undefined;
+  return result.version;
+}
+
+function stripV(v: string | null | undefined): string | undefined {
+  const t = v?.trim();
+  return t ? t.replace(/^v/, "") : undefined;
 }
 
 async function resolveLatestCommitInfo(ctx: RequestContext, project: Project, branch: string) {
@@ -602,6 +685,10 @@ export async function createQueuedDeployment(opts: {
     environment: opts.environment,
     framework: opts.framework,
     status: "queued",
+    // Release/dist deploy identity, from the resolved snapshot. Like commit_sha
+    // (not the human `version` counter): set at CREATE so it's queryable while
+    // the build is in flight — drives new-version suppression + webhook dedupe.
+    releaseVersion: meta.releaseVersion ?? null,
     meta,
     envVars: opts.envVars,
     // Default to git: most projects are GitHub-backed and re-cloning
@@ -727,12 +814,30 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   let routeState = await resolveProjectRouteState(project, { projectDomains });
   const snapshot = buildConfigSnapshot(project, resolvedBranch);
 
+  // Release/dist source: resolve version → prebuilt dist dir → snapshot.localPath
+  // (no build). Runs here, not in the sync buildConfigSnapshot, because the
+  // cache-miss path downloads. Everything downstream sees a plain localPath deploy.
+  if (isReleaseProvider(project.gitProvider)) {
+    await applyReleaseSourceToSnapshot(project, snapshot);
+  }
+
   // Caller-supplied endpoints win. If the caller omitted them (an MCP/API deploy)
   // AND the project has no route yet, default a free subdomain from the project
   // slug — otherwise a static deploy creates an UNBOUND page (404) and a server
   // deploy gets no public URL. The dashboard wizard always sends one; this is parity.
+  //
+  // NOT for services projects: a services deploy exposes PER SERVICE (each row
+  // carries its own publicEndpoints), so there is no project-level domain to
+  // default. An internal-only services stack (e.g. a migrated postgres/redis)
+  // must deploy with no public route — defaulting a free .opsh.io project domain
+  // here made self-hosted migration fail preflight (free domains need cloud edge).
+  const isServicesDeploy = serviceDeploymentMode === "services" || !!services?.length;
   let nextPublicEndpoints = publicEndpoints;
-  if (nextPublicEndpoints === undefined && routeState.publicEndpoints.length === 0) {
+  if (
+    nextPublicEndpoints === undefined &&
+    routeState.publicEndpoints.length === 0 &&
+    !isServicesDeploy
+  ) {
     nextPublicEndpoints = [defaultFreeEndpoint(project)];
   }
 
@@ -1030,6 +1135,16 @@ export async function redeployBuildSession(
     });
   }
 
+  // Release/dist source: refresh the resolved dist dir. useExistingCommit →
+  // redeploy the SAME version; default → newest advertised (parity with the
+  // "redeploy latest commit" semantics below). Re-resolving also guards against
+  // a frozen snapshot whose cached dist dir was since pruned.
+  if (isReleaseProvider(project.gitProvider)) {
+    await applyReleaseSourceToSnapshot(project, meta, {
+      version: opts?.useExistingCommit ? frozenMeta?.releaseVersion : undefined,
+    });
+  }
+
   // Two redeploy modes:
   //   default            — rebuild against the LATEST commit on the branch.
   //                        This is "redeploy this branch" semantics; what
@@ -1213,6 +1328,12 @@ export async function triggerDeployment(
      * builder. Dashboard "Refresh" button.
      */
     refresh?: boolean;
+    /**
+     * Release/dist source: deploy THIS specific version (the `release` webhook
+     * passes the published tag). Omitted for a manual redeploy, which re-resolves
+     * the newest advertised version. Ignored for non-release projects.
+     */
+    releaseVersion?: string;
   },
 ) {
   const project = await repos.project.findById(data.projectId);
@@ -1222,7 +1343,9 @@ export async function triggerDeployment(
   // Org-membership verified at the route boundary. No userId equality
   // check here — that would block team members.
 
-  if (!project.gitUrl && !project.localPath) {
+  // A release/dist-source project has neither a git URL nor a stored localPath —
+  // its dist dir is resolved per-deploy by applyReleaseSourceToSnapshot below.
+  if (!project.gitUrl && !project.localPath && !isReleaseProvider(project.gitProvider)) {
     throw new ForbiddenError("Project has no git repository or local path configured");
   }
   // GitHub access gate (default-deny; webhook ctx is the org owner and
@@ -1285,6 +1408,13 @@ export async function triggerDeployment(
     snapshot.deployTarget = resolvedTarget.deployTarget;
     snapshot.serverId = resolvedTarget.serverId;
     snapshot.runtimeMode = resolvedTarget.runtimeMode;
+  }
+
+  // Release/dist source: resolve the version (webhook-supplied tag, else newest)
+  // → prebuilt dist dir → snapshot.localPath, no build. A reused (rollback)
+  // snapshot already froze its localPath + releaseVersion, so leave it untouched.
+  if (!reuse && isReleaseProvider(project.gitProvider)) {
+    await applyReleaseSourceToSnapshot(project, snapshot, { version: data.releaseVersion });
   }
 
   if (!reuse) {

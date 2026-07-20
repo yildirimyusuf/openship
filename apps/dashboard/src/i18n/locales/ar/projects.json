@@ -185,7 +185,8 @@
     "topPaths": "أهم المسارات",
     "requestCount": "{count} طلب",
     "statusActive": "مفعّل",
-    "statusOff": "معطّل"
+    "statusOff": "معطّل",
+    "server": "الخادم"
   },
   "stats": {
     "serverRequests": "طلبات الخادم",
@@ -266,6 +267,10 @@
     "newCommitTitle": "التزام جديد متاح",
     "newCommitOn": "على",
     "newCommitDeployedOn": "— أنت منشور على",
+    "newVersionTitle": "إصدار جديد متاح",
+    "newVersionAvailable": "يتوفر إصدار أحدث:",
+    "newVersionDeployed": "— أنت منشور على",
+    "deployVersion": "نشر الإصدار الجديد",
     "deploying": "جارٍ النشر…",
     "redeployLatest": "إعادة نشر الأحدث",
     "deployLatestTitle": "نشر أحدث التغييرات",

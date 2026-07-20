@@ -176,9 +176,9 @@ export function MailSetupForm({
           </div>
         </div>
 
-        <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl p-5">
+        <div className="bg-warning-bg border border-warning-border rounded-2xl p-5">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="size-4 text-amber-500 mt-0.5 shrink-0" />
+            <AlertTriangle className="size-4 text-warning mt-0.5 shrink-0" />
             <div>
               <p className="text-sm font-medium text-foreground">{t.emails.setup.prerequisites}</p>
               <ul className="text-xs text-muted-foreground mt-1.5 space-y-1 list-disc list-inside">

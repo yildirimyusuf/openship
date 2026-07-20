@@ -305,7 +305,7 @@ function ConfigureForm({
   return (
     <div className="space-y-6">
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
+        <div className="rounded-xl border border-danger-border bg-danger-bg px-4 py-3 text-sm text-danger">
           {error}
         </div>
       )}

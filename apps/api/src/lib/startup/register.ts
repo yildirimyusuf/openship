@@ -7,8 +7,11 @@
  * Add new feature hooks here.
  */
 import { registerTunnelAutostart } from "../ssh-tunnel-manager";
+import { registerSelfEdge } from "./self-edge";
 
 export function registerStartupHooks(): void {
   // Desktop: re-open saved port-forward tunnels marked auto-start.
   registerTunnelAutostart();
+  // Managed edge: CLI self-deploy routes its own domain → loopback + TLS.
+  registerSelfEdge();
 }

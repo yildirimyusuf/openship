@@ -35,40 +35,41 @@ export const PROJECT_STATUS_META: Record<
   { badge: string; dot: string }
 > = {
   live: {
-    badge: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-    dot: "bg-emerald-500",
+    badge: "bg-success-bg text-success",
+    dot: "bg-success-solid",
   },
   attention: {
-    badge: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-    dot: "bg-amber-500",
+    badge: "bg-warning-bg text-warning",
+    dot: "bg-warning-solid",
   },
   queued: {
-    badge: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
-    dot: "bg-sky-500",
+    badge: "bg-info-bg text-info",
+    dot: "bg-info-solid",
   },
   building: {
-    badge: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
-    dot: "bg-sky-500",
+    badge: "bg-info-bg text-info",
+    dot: "bg-info-solid",
   },
   deploying: {
+    // primary = brand accent, intentionally not a status token.
     badge: "bg-primary/10 text-primary",
     dot: "bg-primary",
   },
   failed: {
-    badge: "bg-red-500/10 text-red-600 dark:text-red-400",
-    dot: "bg-red-500",
+    badge: "bg-danger-bg text-danger",
+    dot: "bg-danger-solid",
   },
   cancelled: {
     badge: "bg-muted text-muted-foreground",
     dot: "bg-muted-foreground",
   },
   deleting: {
-    badge: "bg-red-500/10 text-red-600 dark:text-red-400",
-    dot: "bg-red-500 animate-pulse",
+    badge: "bg-danger-bg text-danger",
+    dot: "bg-danger-solid animate-pulse",
   },
   draft: {
-    badge: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-    dot: "bg-amber-500",
+    badge: "bg-warning-bg text-warning",
+    dot: "bg-warning-solid",
   },
 };
 

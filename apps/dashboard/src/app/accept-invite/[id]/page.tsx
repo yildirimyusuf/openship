@@ -199,8 +199,8 @@ export default function AcceptInvitePage() {
           </div>
         ) : state.kind === "accepted" ? (
           <div className="flex flex-col items-center gap-3 py-4 text-center">
-            <div className="w-12 h-12 rounded-full bg-emerald-500/10 flex items-center justify-center">
-              <Check className="size-6 text-emerald-500" />
+            <div className="w-12 h-12 rounded-full bg-success-bg flex items-center justify-center">
+              <Check className="size-6 text-success" />
             </div>
             <p className="text-base font-medium text-foreground">{m.acceptedTitle}</p>
             <p className="text-sm text-muted-foreground">{m.acceptedRedirect}</p>

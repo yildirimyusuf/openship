@@ -179,9 +179,9 @@ function ChannelsCard({
                 </div>
                 <div className="flex items-center gap-2">
                   {ch.verified ? (
-                    <span className="text-[11px] uppercase tracking-wide text-emerald-500">{t.settings.notifications.channels.verified}</span>
+                    <span className="text-[11px] uppercase tracking-wide text-success">{t.settings.notifications.channels.verified}</span>
                   ) : ch.kind !== "in_app" ? (
-                    <span className="text-[11px] uppercase tracking-wide text-amber-500">{t.settings.notifications.channels.unverified}</span>
+                    <span className="text-[11px] uppercase tracking-wide text-warning">{t.settings.notifications.channels.unverified}</span>
                   ) : null}
                   <button
                     type="button"

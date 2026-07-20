@@ -25,9 +25,9 @@ export function ComponentRow({
         {isInstalling ? (
           <Loader2 className="size-5 text-primary animate-spin" />
         ) : isInstalled || isHealthy ? (
-          <CheckCircle2 className="size-5 text-emerald-500" />
+          <CheckCircle2 className="size-5 text-success" />
         ) : isFailed ? (
-          <XCircle className="size-5 text-red-500" />
+          <XCircle className="size-5 text-danger" />
         ) : (
           <div className="size-5 rounded-full border-2 border-border" />
         )}
@@ -55,8 +55,8 @@ export function ComponentRow({
         <div
           className={`text-xs font-medium px-2.5 py-1 rounded-full ${
             isHealthy
-              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-              : "bg-orange-500/10 text-orange-600 dark:text-orange-400"
+              ? "bg-success-bg text-success"
+              : "bg-warning-bg text-warning"
           }`}
         >
           {isHealthy ? t.servers.setup.ready : t.servers.setup.missing}

@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import { getSession, getDeploymentInfo } from "@/lib/server/session";
+import { getSession, getDeploymentInfoOrNull } from "@/lib/server/session";
+import { ApiUnavailable } from "@/components/api-unavailable";
 import {
   getCloudConnectHandoffUrl,
   buildAuthPageHref,
@@ -89,7 +90,8 @@ export default async function AuthLayout({
     redirect("/");
   }
 
-  const deploymentInfo = await getDeploymentInfo();
+  const deploymentInfo = await getDeploymentInfoOrNull();
+  if (!deploymentInfo) return <ApiUnavailable />;
 
   return (
     <AuthProviders authMode={deploymentInfo.authMode} cloudAuthUrl={deploymentInfo.cloudAuthUrl} selfHosted={deploymentInfo.selfHosted}>

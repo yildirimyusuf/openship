@@ -146,6 +146,15 @@ async function fetchDeploymentInfoWithRetry(): Promise<DeploymentInfo> {
   }
 }
 
+/**
+ * Thrown when the API is unreachable and there's no cached deploy/auth mode.
+ * Callers catch this (via getDeploymentInfoOrNull) to render an explicit
+ * "API unavailable" screen instead of crashing SSR — see <ApiUnavailable />.
+ */
+export class ApiUnreachableError extends Error {
+  override readonly name = "ApiUnreachableError";
+}
+
 export async function getDeploymentInfo(
   options: GetDeploymentInfoOptions = {},
 ): Promise<DeploymentInfo> {
@@ -171,11 +180,28 @@ export async function getDeploymentInfo(
     // Fail loud (same philosophy as runtime-config's invalid-target throw)
     // rather than guess; the orchestrator brings the API up before serving the
     // dashboard, so this only fires if the API is genuinely down.
-    throw new Error(
+    throw new ApiUnreachableError(
       "Cannot resolve deployment info: GET /health/env is unreachable and nothing is cached. " +
         "The dashboard refuses to render with a guessed deploy/auth mode — ensure the API is running.",
       { cause: err },
     );
   }
   return _deploymentInfo;
+}
+
+/**
+ * Like {@link getDeploymentInfo}, but returns null when the API is unreachable
+ * (and nothing is cached) instead of throwing — so a layout can render
+ * <ApiUnavailable /> rather than crash into the error boundary. Any other error
+ * (a real bug) still throws.
+ */
+export async function getDeploymentInfoOrNull(
+  options: GetDeploymentInfoOptions = {},
+): Promise<DeploymentInfo | null> {
+  try {
+    return await getDeploymentInfo(options);
+  } catch (err) {
+    if (err instanceof ApiUnreachableError) return null;
+    throw err;
+  }
 }

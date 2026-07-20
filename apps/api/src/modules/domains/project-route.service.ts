@@ -8,6 +8,7 @@ import {
 } from "../../lib/public-endpoints";
 import { syncProjectPublicRoutes } from "../../lib/project-route-store";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
+import { pushProjectRules } from "../route-rules/route-rule.service";
 import {
   reconcileProjectRoutes,
   type RouteRegister,
@@ -290,6 +291,7 @@ export async function reapplyProjectLiveRoutes(
       `[project-route] ${project.slug}: deployment ${deployment.id} has no containerId (target=${effectiveTarget}) — skipping single-app route registration`,
     );
     await reconcileProjectRoutes(project, { routing, removes });
+    await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
     return;
   }
 
@@ -328,4 +330,9 @@ export async function reapplyProjectLiveRoutes(
   // The webhook-proxy location is re-attached automatically for the project's
   // webhookDomain inside reconcileProjectRoutes.
   await reconcileProjectRoutes(project, { routing, registers, removes });
+
+  // Re-sync per-route edge rules (rate-limit / ban / allow-deny) for the current
+  // hostnames. Best-effort — the DB is the source of truth; a failure defers to
+  // the next reconcile. previousHostnames clears rules for any dropped hostname.
+  await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
 }

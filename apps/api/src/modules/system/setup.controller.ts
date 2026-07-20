@@ -21,6 +21,7 @@ import { audit, auditContextFrom } from "../../lib/audit";
 import { getRequestContext } from "../../lib/request-context";
 import { clearAuthModeCache } from "../../lib/auth-mode";
 import { assertNotCloud } from "../../lib/controller-helpers";
+import { zeroAuthAllowed } from "../../middleware/zero-auth-guard";
 import { normalizeRollbackWindow } from "../../lib/release-retention";
 import { sshManager } from "../../lib/ssh-manager";
 import { encryptSecretField } from "@/lib/credential-encryption";
@@ -100,14 +101,26 @@ export async function setup(c: Context) {
 
   const body = await c.req.json();
 
-  // Instance-level config (non-SSH) → instance_settings table
-  await repos.instanceSettings.upsert({
-    authMode: body.authMode || "none",
+  // Instance-level config (non-SSH) → instance_settings table.
+  // authMode is security-sensitive and this handler is ALSO reachable
+  // UNauthenticated via POST /onboarding — so run the SAME zero-auth safety
+  // gate the authenticated PATCH /settings uses, and never blindly force
+  // "none" when the caller omits it (that default is exactly what let a public
+  // first-run request weaken the instance). When omitted, leave authMode unset
+  // so the canonical getAuthMode() default applies (self-hosted → "local").
+  const settingsPatch: Record<string, unknown> = {
     tunnelProvider: body.tunnelProvider || null,
     tunnelToken: body.tunnelToken || null,
     defaultBuildMode: body.defaultBuildMode || "auto",
     defaultRollbackWindow: normalizeRollbackWindow(body.defaultRollbackWindow),
-  });
+  };
+  if (body.authMode !== undefined) {
+    const validation = validateAuthModeChange(body);
+    if (!validation.ok) return c.json(validation.body, validation.status);
+    settingsPatch.authMode = validation.value;
+  }
+  await repos.instanceSettings.upsert(settingsPatch);
+  clearAuthModeCache();
 
   // SSH server config → servers table (single source of truth)
   let serverId: string | undefined;
@@ -306,6 +319,91 @@ export async function onboardingStatus(c: Context) {
   return c.json({ configured: servers.length > 0 });
 }
 
+// ── First-admin bootstrap (CLI setup) ────────────────────────────────────────
+
+/**
+ * POST /system/bootstrap-admin — create the FIRST admin from the CLI.
+ *
+ * How `openship` setup makes a CLI-managed instance without ever using
+ * zero-auth: the service boots in local-auth mode (OPENSHIP_REQUIRE_AUTH), and
+ * the CLI — holding the instance's INTERNAL_TOKEN — calls this to mint the
+ * initial email/password admin. It reuses the exact account-creation the
+ * desktop onboarding uses (ensureLocalUser → credential account → authMode
+ * local), so the admin owns the auto-created personal org.
+ *
+ * Gates (defense in depth):
+ *   - `internalAuth` at the route: requires X-Internal-Token, so a browser
+ *     reaching this through the public dashboard proxy can't call it.
+ *   - one-shot: refuses once any real (non-auto-provisioned) admin exists.
+ */
+export async function bootstrapAdmin(c: Context) {
+  const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
+
+  const [existing] = await db
+    .select({ id: schema.user.id })
+    .from(schema.user)
+    .where(eq(schema.user.autoProvisioned, false))
+    .limit(1);
+  if (existing) {
+    return c.json({ error: "An admin account already exists" }, 409);
+  }
+
+  const body = (await c.req.json()) as { name?: unknown; email?: unknown; password?: unknown };
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+
+  if (!name || name.length < 1 || name.length > 100) {
+    return c.json({ error: "name is required (1-100 chars)" }, 400);
+  }
+  if (!email || !email.includes("@") || email.length > 254) {
+    return c.json({ error: "email must be a valid address" }, 400);
+  }
+  if (password.length < 8 || password.length > 128) {
+    return c.json({ error: "password must be 8-128 characters" }, 400);
+  }
+
+  const localUser = await ensureLocalUser();
+  const conflict = await repos.user.findByEmail(email);
+  if (conflict && conflict.id !== localUser.id) {
+    return c.json({ error: "An account with this email already exists" }, 409);
+  }
+
+  const hashed = await hashPassword(password);
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.user)
+      .set({ name, email, emailVerified: true, autoProvisioned: false, updatedAt: new Date() })
+      .where(eq(schema.user.id, localUser.id));
+    await tx
+      .delete(schema.account)
+      .where(and(eq(schema.account.userId, localUser.id), eq(schema.account.providerId, "credential")));
+    await tx.insert(schema.account).values({
+      id: generateId("acc"),
+      accountId: localUser.id,
+      providerId: "credential",
+      userId: localUser.id,
+      password: hashed,
+    });
+    await tx
+      .insert(schema.instanceSettings)
+      .values({ id: "default", authMode: "local" })
+      .onConflictDoUpdate({ target: schema.instanceSettings.id, set: { authMode: "local", updatedAt: new Date() } });
+  });
+
+  invalidateLocalUserCache();
+  clearAuthModeCache();
+
+  audit.recordAsync(auditContextFrom(c, "instance", localUser.id), {
+    eventType: "admin.bootstrapped",
+    resourceType: "instance-settings",
+    resourceId: "instance",
+    after: { userId: localUser.id, email },
+  });
+
+  return c.json({ ok: true, email });
+}
+
 // ── Auth upgrade (zero-auth → local-auth) ────────────────────────────────────
 
 /**
@@ -333,15 +431,16 @@ export async function onboardingStatus(c: Context) {
 export async function upgradeToAuth(c: Context) {
   const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
 
-  const settings = await repos.instanceSettings.get();
-  const currentMode = settings?.authMode ?? "none";
-  if (currentMode !== "none") {
+  // PUBLIC route (no session exists yet) → it MUST enforce the same zero-auth
+  // guardrails authMiddleware does. Using the shared guard (canonical authMode
+  // default + loopback + opt-in) closes the CWE-306 takeover: a fresh, network-
+  // reachable self-hosted install now resolves to "local" (not "none"), and a
+  // non-loopback peer can never bootstrap the first admin.
+  const gate = await zeroAuthAllowed(c);
+  if (!gate.ok) {
+    console.warn(`[upgradeToAuth] refused: ${gate.reason}`);
     return c.json(
-      {
-        error:
-          "Auth upgrade is only available from zero-auth mode. Current mode: " +
-          currentMode,
-      },
+      { error: "Auth upgrade is only available from a loopback zero-auth (desktop) instance." },
       400,
     );
   }

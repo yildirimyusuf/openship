@@ -9,6 +9,7 @@ import React, {
   useRef,
   useMemo,
 } from "react";
+import { isServicesFramework } from "@repo/core";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/components/i18n-provider";
 import { projectsApi, servicesApi, type Service } from "@/lib/api";
@@ -808,9 +809,14 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     return tab || undefined; // let default be set by tab list below
   };
 
+  // Service-FIRST = the project itself is a compose/services-stack project (no
+  // single primary app). Keyed on the framework, NOT on "a service row exists"
+  // — a single/static app that had a sidecar service added is still an app and
+  // KEEPS its Configuration tab. Only a genuine compose project drops it.
+  const isServicesProject = isServicesFramework(projectData.framework);
   const tabs = useMemo(() => {
     const tl = t.projects.sidebar.tabs;
-    return [
+    const all = [
       { id: "overview", label: tl.overview, icon: "setting-100-1658432731.png" },
       { id: "services", label: tl.services, icon: "layers.png" },
       { id: "domains", label: tl.domains, icon: "server-59-1658435258.png" },
@@ -821,7 +827,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       { id: "backup", label: tl.backup, icon: "database.png" },
       { id: "advanced", label: tl.advanced, icon: "error%20triangle-81-1658234612.png" },
     ];
-  }, [t]);
+    // A service-first project has no single-app runtime — config lives per
+    // service under Services — so hide the Configuration (runtime) tab there.
+    return isServicesProject ? all.filter((tab) => tab.id !== "runtime") : all;
+  }, [t, isServicesProject]);
 
   const defaultTab = tabs[0].id;
   const [activeTab, setActiveTab] = useState(resolveTab(slug?.[0]) || defaultTab);

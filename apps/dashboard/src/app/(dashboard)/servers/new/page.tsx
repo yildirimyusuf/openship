@@ -291,6 +291,7 @@ export default function AddServerPage() {
               onSelect={(selectedMode) => {
                 void runSetupChecks(selectedMode);
               }}
+              onSkip={() => router.push(activeServerId ? `/servers/${activeServerId}` : "/servers")}
             />
           )}
 

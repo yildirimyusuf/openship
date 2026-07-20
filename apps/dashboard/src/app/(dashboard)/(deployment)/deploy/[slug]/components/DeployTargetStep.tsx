@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Sparkles, Settings2, Zap, Globe, GitBranch } from "lucide-react";
+import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
 import type { DeploymentConfig } from "@/context/deployment/types";
@@ -82,56 +82,128 @@ export const OptionCard: React.FC<OptionCardProps> = ({
   </div>
 );
 
-// ─── Server sub-selector (shown when "Servers" is selected with multiple) ────
+// ─── Server picker (collapsed → searchable list) ─────────────────────────────
 
-interface ServerSubSelectorProps {
+interface ServerPickerProps {
   servers: ServerInfo[];
   selectedId?: string;
   onSelect: (server: ServerInfo) => void;
+  /** Renders "+ Add your own server" as the last row of the open list. */
+  onAddServer?: () => void;
 }
 
-const ServerSubSelector: React.FC<ServerSubSelectorProps> = ({
-  servers,
-  selectedId,
-  onSelect,
-}) => {
+/** Server-glyph avatar + name + host line — shared by the collapsed trigger and
+ *  each list row. */
+const ServerRowContent: React.FC<{ server: ServerInfo; active: boolean }> = ({ server, active }) => (
+  <>
+    <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
+      active ? "bg-primary/15 text-primary" : "bg-muted/50 text-muted-foreground"
+    }`}>
+      <Server className="size-3.5" />
+    </div>
+    <div className="flex-1 min-w-0">
+      <p className="text-sm font-medium text-foreground truncate">{server.name || server.sshHost}</p>
+      <p className="text-[11px] text-muted-foreground truncate">
+        {server.sshUser || "root"}@{server.sshHost}:{server.sshPort || 22}
+      </p>
+    </div>
+  </>
+);
+
+const ServerPicker: React.FC<ServerPickerProps> = ({ servers, selectedId, onSelect, onAddServer }) => {
   const { t } = useI18n();
+  const ts = t.deploy.targetStep;
+  const selected = servers.find((s) => s.id === selectedId);
+  // Collapsed once a server is chosen; auto-open to the list when none is yet
+  // (so a fresh "Your servers" pick lands straight on the searchable list).
+  const [open, setOpen] = useState(!selected);
+  const [query, setQuery] = useState("");
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? servers.filter((s) =>
+        `${s.name ?? ""} ${s.sshUser || "root"}@${s.sshHost}:${s.sshPort || 22}`
+          .toLowerCase()
+          .includes(q),
+      )
+    : servers;
+
   return (
-  <div className="space-y-1.5">
-    <p className="text-xs font-medium text-muted-foreground mb-2">{t.deploy.targetStep.chooseServer}</p>
-    {servers.map((s) => {
-      const isSelected = selectedId === s.id;
-      return (
-        <button
-          key={s.id}
-          type="button"
-          onClick={() => onSelect(s)}
-          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all ${
-            isSelected
-              ? "bg-primary/10 border border-primary/30"
-              : "bg-card/60 border border-border/30 hover:border-primary/20 hover:bg-muted/30"
-          }`}
-        >
-          <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
-            isSelected ? "bg-primary/15 text-primary" : "bg-muted/50 text-muted-foreground"
-          }`}>
-            <Server className="size-3.5" />
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground mb-2">{ts.chooseServer}</p>
+
+      {/* Collapsed trigger — the selected server, or a placeholder. */}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all border ${
+          open
+            ? "border-primary/30 bg-muted/20"
+            : "bg-card/60 border-border/30 hover:border-primary/20 hover:bg-muted/30"
+        }`}
+      >
+        {selected ? (
+          <ServerRowContent server={selected} active />
+        ) : (
+          <>
+            <div className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 bg-muted/50 text-muted-foreground">
+              <Server className="size-3.5" />
+            </div>
+            <span className="flex-1 text-sm text-muted-foreground">{ts.chooseServer}</span>
+          </>
+        )}
+        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {/* Expanded — search box + filtered, scrollable list. */}
+      {open && (
+        <div className="rounded-lg border border-border/40 bg-card/40 p-1.5 space-y-1.5">
+          <div className="relative">
+            <Search className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={ts.searchPlaceholder}
+              className="w-full ps-9 pe-3 py-2 bg-card border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+            />
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-foreground truncate">
-              {s.name || s.sshHost}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              {s.sshUser || "root"}@{s.sshHost}:{s.sshPort || 22}
-            </p>
+          <div className="max-h-64 overflow-y-auto space-y-1 pe-0.5">
+            {filtered.map((s) => {
+              const isSelected = selectedId === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => { onSelect(s); setQuery(""); setOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all ${
+                    isSelected
+                      ? "bg-primary/10 border border-primary/30"
+                      : "bg-card/60 border border-transparent hover:border-primary/20 hover:bg-muted/30"
+                  }`}
+                >
+                  <ServerRowContent server={s} active={isSelected} />
+                  {isSelected && <CheckCircle2 className="size-4 text-primary shrink-0" />}
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <p className="px-3 py-6 text-center text-xs text-muted-foreground">{ts.noServersMatch}</p>
+            )}
           </div>
-          {isSelected && (
-            <CheckCircle2 className="size-4 text-primary shrink-0" />
+          {onAddServer && (
+            <button
+              type="button"
+              onClick={onAddServer}
+              className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/50 px-3 py-2.5 text-[13px] text-muted-foreground transition-all hover:border-primary/40 hover:bg-muted/30 hover:text-foreground"
+            >
+              <Plus className="size-3.5" />
+              {ts.addServer}
+            </button>
           )}
-        </button>
-      );
-    })}
-  </div>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -216,14 +288,14 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
     deployTarget === "cloud"
       ? !hasServer
         ? (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/10 text-[11px] font-medium text-sky-500 shrink-0">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-info-bg text-[11px] font-medium text-info shrink-0">
             <Globe className="size-3" />
             {t.deploy.summary.static}
           </span>
         )
         : cloudResourceTier
           ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 text-[11px] font-medium text-amber-500 shrink-0">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-bg text-[11px] font-medium text-warning shrink-0">
               <Zap className="size-3" />
               <span>{tierLabels[cloudResourceTier] ?? cloudResourceTier}</span>
             </span>
@@ -545,7 +617,7 @@ const CloudPowerPicker: React.FC = () => {
         <div className="space-y-3">
             <div>
                 <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                    <Zap className="size-4 text-amber-500" />
+                    <Zap className="size-4 text-warning" />
                     {t.deploy.power.heading}
                 </h3>
                 <p className="text-sm text-muted-foreground mt-0.5">
@@ -673,10 +745,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // hint card instead. Flipped off on the first successful Continue so the
   // full picker re-appears on subsequent deploys.
   const [isFirstBuildHint, setIsFirstBuildHint] = useState(false);
-  // User can opt into picking the build location manually from inside the
-  // hint - when true, the hint hides and the full Build picker is shown.
-  const [revealBuildPicker, setRevealBuildPicker] = useState(false);
-  // Build picker on subsequent deploys lives under an "Advanced" disclosure
+  // Build picker lives under an "Advanced" disclosure
   // so the screen leads with the deploy-target decision. Folded by default
   // because the build strategy is correctly seeded from the user's saved
   // default — most operators never need to touch it on a per-deploy basis.
@@ -687,6 +756,10 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // silently snaps back to the cloud default. Reset when the deploy target
   // changes so the sensible default applies to the new target.
   const buildStrategyTouchedRef = useRef(false);
+  // Fresh server-app deploys default to Sandbox (docker). The Sandbox/Direct
+  // picker now lives in the collapsed Advanced disclosure and may never mount,
+  // so we can't rely on its own auto-default — seed it here instead.
+  const runtimeDefaultedRef = useRef(false);
 
   // Add server inline via modal. On create, refresh the server list and
   // auto-select the new one so the user lands on it immediately - no extra
@@ -721,18 +794,37 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     setIsFirstBuildHint(!buildHintFlag.isSet());
   }, []);
 
-  // First-deploy-only: auto-match build to deploy target. If the user opts
-  // to pick manually via the hint's "Choose build location", `revealBuildPicker`
-  // flips and we stop forcing the match.
+  // First-deploy-only: auto-match build to deploy target until the user makes
+  // an explicit pick in the Advanced disclosure (buildStrategyTouchedRef).
   useEffect(() => {
     // Never override an explicit user pick — only auto-match on the untouched
     // first-deploy default.
-    if (!isFirstBuildHint || revealBuildPicker || buildStrategyTouchedRef.current) return;
+    if (!isFirstBuildHint || buildStrategyTouchedRef.current) return;
     const want: BuildStrategy = config.deployTarget === "local" ? "local" : "server";
     if (config.buildStrategy !== want) {
       updateConfig({ buildStrategy: want });
     }
-  }, [isFirstBuildHint, revealBuildPicker, config.deployTarget, config.buildStrategy, updateConfig]);
+  }, [isFirstBuildHint, config.deployTarget, config.buildStrategy, updateConfig]);
+
+  // Sandbox (docker) is the default for a fresh self-hosted server APP. Seeded
+  // once, and only when the runtime choice actually applies (server app, not
+  // docker/compose/static) — never clobbers a saved project value or a choice
+  // the user makes in Advanced.
+  useEffect(() => {
+    if (config.projectId || runtimeDefaultedRef.current) return;
+    if (config.deployTarget !== "server") return;
+    if (!config.options.hasServer || config.projectType === "docker" || isServiceDeployment) return;
+    runtimeDefaultedRef.current = true;
+    if (config.runtimeMode !== "docker") updateConfig({ runtimeMode: "docker" });
+  }, [
+    config.projectId,
+    config.deployTarget,
+    config.options.hasServer,
+    config.projectType,
+    isServiceDeployment,
+    config.runtimeMode,
+    updateConfig,
+  ]);
 
   // Seed the picker from the user's saved default (if any). The ref makes
   // sure we only ever APPLY the default once - even under StrictMode's
@@ -1124,43 +1216,109 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // page just centers it — the two-column layout needs the wide track, the
   // single-column onboarding stays narrow.
   const showCloudPicker = showFullPicker && config.deployTarget === "cloud";
-  const showServerRuntime =
-    showFullPicker &&
-    config.deployTarget === "server" &&
-    !!config.serverId &&
-    config.options.hasServer &&
-    config.projectType !== "docker" &&
-    !isServiceDeployment;
-  // Docker/services server deploys always build on the server; their "how it
-  // runs" choice is the clone LOCATION. Give it the same right-panel treatment
-  // as the cloud power + runtime pickers so the step uses the full width instead
-  // of stacking everything in one narrow column.
-  const showClonePanel = showFullPicker && showCloneStrategy && !!config.serverId;
-  const showRightPanel = showCloudPicker || showServerRuntime || showClonePanel;
+  // Server runtime / build / clone knobs now live under ONE collapsed "Advanced"
+  // disclosure in the main column instead of an always-open right panel — the
+  // main screen is just "where to deploy", details one click away. Default is
+  // Sandbox; most users never open this. Only cloud keeps a right-hand panel
+  // (its resource/power picker).
+  const showServerAdvanced =
+    showFullPicker && config.deployTarget === "server" && !!config.serverId;
+  // Runtime-isolation (Sandbox/Direct) applies only to a self-hosted server APP —
+  // docker/compose always run sandboxed, static has no long-running process.
+  const showRuntimeIsolation =
+    config.options.hasServer && config.projectType !== "docker" && !isServiceDeployment;
+  const showRightPanel = showCloudPicker || showServerAdvanced;
+
+  // Action controls (extracted so they can live in the left column on a single-
+  // column layout, or move into the right column — above the Advanced/Cloud
+  // panel — when a right panel is shown: Continue → save-default → Advanced).
+  const saveDefaultCheckbox =
+    showFullPicker && canContinue ? (
+      <label className="flex items-start gap-2.5 cursor-pointer select-none px-1">
+        <input
+          type="checkbox"
+          checked={saveAsDefault}
+          onChange={(e) => setSaveAsDefault(e.target.checked)}
+          disabled={savingDefault}
+          className="mt-0.5 size-4 shrink-0 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 cursor-pointer disabled:opacity-50"
+        />
+        <span className="text-sm text-muted-foreground leading-snug">
+          {ts.saveDefault}{" "}
+          <span className="text-muted-foreground/70">{ts.saveDefaultHint}</span>
+        </span>
+      </label>
+    ) : null;
+
+  // Shared Continue styling. In the two-column layout it fills the right
+  // ("advanced") column (see the header grid below); single-column keeps it
+  // auto-width on the right of the header row.
+  const continueBtnClass =
+    "inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl transition-all hover:bg-primary/90 hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none";
+  const continueLabel = (
+    <>
+      {ts.continue}
+      <ArrowRight className="size-4 rtl:rotate-180" />
+    </>
+  );
+
+  // Unified header — title + subtitle (left) and Continue (right). When a right
+  // ("advanced") panel is shown the header mirrors the body's column template
+  // exactly, so Continue starts at the divider and spans the advanced column,
+  // sitting directly above that panel instead of floating at the far edge.
+  const headerTitle = useCompact ? ts.deployAndBuildHeading : ts.heading;
+  const headerSubtitle = showLoading
+    ? ts.loadingSubtitle
+    : useCompact
+      ? null
+      : hasAnyDeployTarget
+        ? hasChoice
+          ? ts.chooseSubtitle
+          : ts.onlyOneSubtitle
+        : ts.noTargetSubtitle;
+  const headerTitleBlock = (
+    <div className="min-w-0">
+      <h1 className="text-2xl font-medium text-foreground/80" style={{ letterSpacing: "-0.2px" }}>
+        {headerTitle}
+      </h1>
+      {headerSubtitle && <p className="text-sm text-muted-foreground/70 mt-1">{headerSubtitle}</p>}
+    </div>
+  );
+  const header = showRightPanel ? (
+    // Same track as the body grid (gap-0 on lg) so the third cell lines up
+    // pixel-for-pixel with the advanced panel underneath it.
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_1px_320px] lg:gap-0 lg:items-start">
+      <div className="lg:pe-6">{headerTitleBlock}</div>
+      <div className="hidden lg:block" aria-hidden />
+      <div className="lg:ps-6">
+        <button type="button" onClick={handleContinue} disabled={!canContinue} className={`w-full ${continueBtnClass}`}>
+          {continueLabel}
+        </button>
+      </div>
+    </div>
+  ) : (
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      {headerTitleBlock}
+      <button type="button" onClick={handleContinue} disabled={!canContinue} className={`shrink-0 ${continueBtnClass}`}>
+        {continueLabel}
+      </button>
+    </div>
+  );
 
   return (
-    <div
-      className={
-        showRightPanel
-          ? "mx-auto w-full max-w-5xl grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1px_320px] gap-0 items-start"
-          : "mx-auto w-full max-w-lg"
-      }
-    >
+    <div className={`mx-auto w-full space-y-8 ${showRightPanel ? "max-w-5xl" : "max-w-lg"}`}>
+      {header}
+      <div
+        className={
+          showRightPanel
+            ? "grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1px_320px] gap-0 items-start"
+            : ""
+        }
+      >
     <div className={`space-y-8 ${showRightPanel ? "lg:pe-6" : ""}`}>
       {showLoading && (
-        <div className="space-y-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">
-              {ts.heading}
-            </h3>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {ts.loadingSubtitle}
-            </p>
-          </div>
-          <div className="flex items-center justify-center gap-2 rounded-xl border border-border/50 bg-card px-4 py-8 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            {ts.loadingCheck}
-          </div>
+        <div className="flex items-center justify-center gap-2 rounded-xl border border-border/50 bg-card px-4 py-8 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          {ts.loadingCheck}
         </div>
       )}
 
@@ -1168,31 +1326,18 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
           is the edit affordance: clicking expands the full picker so the
           user can change build/deploy for this one deployment. */}
       {useCompact && (
-        <div className="space-y-3">
-          <h3 className="text-base font-semibold text-foreground">
-            {ts.deployAndBuildHeading}
-          </h3>
-          <DeployTargetSummary
-            deployTarget={config.deployTarget}
-            buildStrategy={config.buildStrategy}
-            serverName={summaryServerName}
-            showBuildStrategy={showBuildStrategy}
-            onEdit={() => setExpanded(true)}
-          />
-        </div>
+        <DeployTargetSummary
+          deployTarget={config.deployTarget}
+          buildStrategy={config.buildStrategy}
+          serverName={summaryServerName}
+          showBuildStrategy={showBuildStrategy}
+          onEdit={() => setExpanded(true)}
+        />
       )}
 
       {/* Deploy target */}
       {showFullPicker && hasAnyDeployTarget && (
         <div className="space-y-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">
-              {ts.heading}
-            </h3>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {hasChoice ? ts.chooseSubtitle : ts.onlyOneSubtitle}
-            </p>
-          </div>
           <div className="space-y-2">
             {deployTargetOptions.map((opt) => (
               <OptionCard
@@ -1204,18 +1349,22 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                 label={opt.label}
                 description={opt.description}
               >
-                {/* Sub-selector for multiple servers */}
+                {/* Collapsed, searchable picker for multiple servers — carries
+                    its own "Add your own server" row inside the open list. */}
                 {opt.value === "server" && !isSingleServer && config.deployTarget === "server" && (
-                  <ServerSubSelector
+                  <ServerPicker
                     servers={servers}
                     selectedId={config.serverId}
                     onSelect={handleServerSelect}
+                    onAddServer={selfHosted ? openAddServer : undefined}
                   />
                 )}
               </OptionCard>
             ))}
           </div>
-          {selfHosted && (
+          {/* External add-server button only when the picker (which now owns it)
+              isn't shown — i.e. cloud selected, or the single-server case. */}
+          {selfHosted && !(config.deployTarget === "server" && !isSingleServer) && (
             <button
               type="button"
               onClick={openAddServer}
@@ -1226,45 +1375,11 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
             </button>
           )}
 
-          {/* Git credential forwarding — BARE runtime only (docker uses the
-              clone-location picker in Advanced below). Desktop-only, server
-              target, default off. Bare always clones on the server; this lets it
-              clone with the operator's local `gh` instead of failing on a private
-              repo. Nothing is persisted; the relay closes when the build ends. */}
-          {isDesktop && config.deployTarget === "server" && config.runtimeMode === "bare" && !isServiceDeployment && (
-            <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-xl border border-border/50 bg-card/40 px-4 py-3">
-              <input
-                type="checkbox"
-                checked={config.forwardGitCredentials === true}
-                onChange={(e) => updateConfig({ forwardGitCredentials: e.target.checked })}
-                className="mt-0.5 size-4 shrink-0 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 cursor-pointer"
-              />
-              <span className="min-w-0">
-                <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                  <GitBranch className="size-3.5 text-muted-foreground" />
-                  {ts.gitForwardLabel}
-                </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground leading-snug">
-                  {ts.gitForwardDescPre}
-                  <span className="font-mono text-foreground/80">gh</span>
-                  {ts.gitForwardDescPost}
-                </span>
-              </span>
-            </label>
-          )}
         </div>
       )}
 
       {showFullPicker && !hasAnyDeployTarget && (
         <div className="space-y-3">
-          <div>
-            <h3 className="text-base font-semibold text-foreground">
-              {ts.heading}
-            </h3>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {ts.noTargetSubtitle}
-            </p>
-          </div>
           <div className="rounded-xl border border-border/50 bg-card px-4 py-4 text-sm text-muted-foreground leading-relaxed">
             {ts.noTargetBody}
           </div>
@@ -1281,182 +1396,147 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
         </div>
       )}
 
-      {/* First-deploy hint - replaces the build picker on the user's very
-          first deployment. We auto-match build to deploy target and surface
-          the option as an inline "did you know" so the picker isn't gone
-          forever - they can reveal it inline or change it on the next
-          screen. After the first Continue, the full picker is always shown. */}
-      {showFullPicker && showBuildStrategy && isFirstBuildHint && !revealBuildPicker && (
-        <div className="rounded-xl border border-border/40 bg-muted/15 px-4 py-3.5">
-          <div className="flex items-start gap-3">
-            <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center shrink-0">
-              <Sparkles className="size-4 text-amber-500" strokeWidth={1.75} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-foreground">
-                {config.options.hasBuild ? ts.hint.buildTitle : ts.hint.prepareTitle}
-              </p>
-              <p className="text-xs text-muted-foreground leading-relaxed mt-1">
-                {config.deployTarget === "cloud"
-                  ? ts.hint.cloud
-                  : config.deployTarget === "server"
-                    ? (summaryServerName
-                        ? interpolate(ts.hint.serverNamed, { name: summaryServerName })
-                        : ts.hint.server)
-                    : ts.hint.local}
-              </p>
-              {config.deployTarget !== "cloud" && (
-                <button
-                  type="button"
-                  onClick={() => setRevealBuildPicker(true)}
-                  className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {ts.hint.chooseBuildLocation}
-                  <ArrowRight className="size-3 rtl:rotate-180" />
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Advanced (Sandbox/Direct, build location, clone, git-forward) renders
+          as a compact panel in the RIGHT column for server deploys — see the
+          right-panel block below. Continue lives in the unified header. */}
 
-      {showFullPicker && showBuildStrategy && (!isFirstBuildHint || revealBuildPicker) && (
-        <div className="rounded-2xl border border-border/50 bg-card">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="flex w-full items-center justify-between gap-4 px-5 py-4 text-start"
-          >
-            <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-xl bg-muted/40">
-                <Settings2 className="size-4 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-foreground">{ts.build.advanced}</p>
-                <p className="text-xs text-muted-foreground">{advancedSummary}</p>
-              </div>
-            </div>
-            {advancedOpen ? (
-              <ChevronUp className="size-4 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="size-4 text-muted-foreground" />
-            )}
-          </button>
-
-          {advancedOpen && (
-            <div className="border-t border-border/50 px-5 py-4">
-              <div className="space-y-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">
-                    {config.options.hasBuild ? ts.build.heading : ts.build.prepareHeading}
-                  </h3>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {config.options.hasBuild ? ts.build.subtitle : ts.build.prepareSubtitle}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  {visibleBuildOptions.map((opt) => (
-                    <OptionCard
-                      key={opt.value}
-                      value={opt.value}
-                      selected={config.buildStrategy === opt.value}
-                      onSelect={() => {
-                        buildStrategyTouchedRef.current = true;
-                        updateConfig({ buildStrategy: opt.value });
-                      }}
-                      icon={opt.icon}
-                      label={opt.label}
-                      description={opt.description}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Save as default - fire-and-forget on continue. Only shown in the
-          full picker; in compact mode the default's already in use. */}
-      {showFullPicker && canContinue && (
-        <label className="flex items-start gap-2.5 cursor-pointer select-none px-1">
-          <input
-            type="checkbox"
-            checked={saveAsDefault}
-            onChange={(e) => setSaveAsDefault(e.target.checked)}
-            disabled={savingDefault}
-            className="mt-0.5 size-4 shrink-0 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 cursor-pointer disabled:opacity-50"
-          />
-          <span className="text-sm text-muted-foreground leading-snug">
-            {ts.saveDefault}{" "}
-            <span className="text-muted-foreground/70">
-              {ts.saveDefaultHint}
-            </span>
-          </span>
-        </label>
-      )}
-
-      {/* Continue */}
-      <button
-        type="button"
-        onClick={handleContinue}
-        disabled={!canContinue}
-        className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none"
-      >
-        {ts.continue}
-        <ArrowRight className="size-4 rtl:rotate-180" />
-      </button>
+      {/* Single-column layout: save-default sits under the options (Continue is
+          in the header). With a right panel, save-default moves into it. */}
+      {!showRightPanel && saveDefaultCheckbox}
     </div>
     {showRightPanel && (
       <>
-        {/* Vertical divider line between the two columns. Sits in its
-            own 1px-wide grid track so the column widths stay clean and
-            the line is perfectly centered in the gutter. Hidden on
-            mobile where the layout collapses to a single column. */}
+        {/* Vertical divider between the two columns. Right column = cloud
+            power/resource picker OR the server "Advanced" disclosure — a
+            compact panel beside the target choice instead of a wide expander
+            under it. */}
         <div className="hidden lg:block w-px bg-border self-stretch" />
-        {/* Slide-in keyed on deployTarget so the animation re-fires
-            each time the user flips targets (not only on first selection).
-            Stacks whichever "how it runs" pickers apply to this target:
-            cloud power, runtime isolation, and/or clone location. */}
         <div key={config.deployTarget} className="lg:ps-6 animate-slide-in-right space-y-6">
+          {/* Continue is in the unified header; the right column carries the
+              save-default toggle then the Cloud/Advanced panel. */}
+          {saveDefaultCheckbox}
           {showCloudPicker && <CloudPowerPicker />}
-          {showServerRuntime && <ServerRuntimePicker />}
-          {showClonePanel && (
-            <div className="space-y-3">
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">
-                  {ts.clone.heading}
-                </h3>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {ts.clone.descLead}
-                  {isDesktop ? ts.clone.descDesktop : ts.clone.descServer}
-                </p>
-              </div>
-              <div className="space-y-2">
-                {cloneOptions.map((opt) => (
-                  <OptionCard
-                    key={opt.value}
-                    value={opt.value}
-                    selected={cloneStrategy === opt.value}
-                    onSelect={() =>
-                      updateConfig({
-                        cloneStrategy: opt.value,
-                        // Desktop opts into the relay when cloning on the server;
-                        // non-desktop uses the token path (no relay).
-                        forwardGitCredentials: opt.value === "server" && isDesktop,
-                      })
-                    }
-                    icon={opt.icon}
-                    label={opt.label}
-                    description={opt.description}
-                  />
-                ))}
-              </div>
+          {showServerAdvanced && (
+            <div className="rounded-2xl border border-border/50 bg-card">
+              <button
+                type="button"
+                onClick={() => setAdvancedOpen((v) => !v)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3.5 text-start"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/40">
+                    <Settings2 className="size-4 text-muted-foreground" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-foreground">{ts.build.advanced}</p>
+                    <p className="truncate text-xs text-muted-foreground">{advancedSummary}</p>
+                  </div>
+                </div>
+                {advancedOpen ? (
+                  <ChevronUp className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+                )}
+              </button>
+
+              {advancedOpen && (
+                <div className="border-t border-border/50 px-4 py-4 space-y-5">
+                  {/* Runtime isolation — Sandbox (default) vs Direct. Server app only. */}
+                  {showRuntimeIsolation && <ServerRuntimePicker />}
+
+                  {/* Build location — where the clone + build run. */}
+                  {showBuildStrategy && (
+                    <div className="space-y-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground">
+                          {config.options.hasBuild ? ts.build.heading : ts.build.prepareHeading}
+                        </h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {config.options.hasBuild ? ts.build.subtitle : ts.build.prepareSubtitle}
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        {visibleBuildOptions.map((opt) => (
+                          <OptionCard
+                            key={opt.value}
+                            value={opt.value}
+                            selected={config.buildStrategy === opt.value}
+                            onSelect={() => {
+                              buildStrategyTouchedRef.current = true;
+                              updateConfig({ buildStrategy: opt.value });
+                            }}
+                            icon={opt.icon}
+                            label={opt.label}
+                            description={opt.description}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Clone location — docker/compose server deploys (sandboxed). */}
+                  {showCloneStrategy && (
+                    <div className="space-y-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground">
+                          {ts.clone.heading}
+                        </h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {ts.clone.descLead}
+                          {isDesktop ? ts.clone.descDesktop : ts.clone.descServer}
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        {cloneOptions.map((opt) => (
+                          <OptionCard
+                            key={opt.value}
+                            value={opt.value}
+                            selected={cloneStrategy === opt.value}
+                            onSelect={() =>
+                              updateConfig({
+                                cloneStrategy: opt.value,
+                                forwardGitCredentials: opt.value === "server" && isDesktop,
+                              })
+                            }
+                            icon={opt.icon}
+                            label={opt.label}
+                            description={opt.description}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Git credential forwarding — Direct (bare) app, desktop-only. */}
+                  {isDesktop && config.runtimeMode === "bare" && !isServiceDeployment && (
+                    <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-xl border border-border/50 bg-card/40 px-4 py-3">
+                      <input
+                        type="checkbox"
+                        checked={config.forwardGitCredentials === true}
+                        onChange={(e) => updateConfig({ forwardGitCredentials: e.target.checked })}
+                        className="mt-0.5 size-4 shrink-0 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 cursor-pointer"
+                      />
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                          <GitBranch className="size-3.5 text-muted-foreground" />
+                          {ts.gitForwardLabel}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground leading-snug">
+                          {ts.gitForwardDescPre}
+                          <span className="font-mono text-foreground/80">gh</span>
+                          {ts.gitForwardDescPost}
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
       </>
     )}
+      </div>
     </div>
   );
 };

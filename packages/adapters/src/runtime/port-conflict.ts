@@ -32,7 +32,10 @@ async function resolveSystemdUnit(
     ?? cgroup?.match(/(?:^|\/)([^/\n]+\.service)(?:$|\n|\/)/m);
   const systemdUnit = unitMatch?.[1]?.trim();
 
-  if (!systemdUnit) {
+  // Reject anything that isn't a plain systemd unit name — the value is parsed
+  // from /proc text and later interpolated into `systemctl` commands, so a
+  // crafted cgroup leaf must never carry shell metacharacters through.
+  if (!systemdUnit || !/^[A-Za-z0-9@._:\\-]+\.service$/.test(systemdUnit)) {
     return {};
   }
 

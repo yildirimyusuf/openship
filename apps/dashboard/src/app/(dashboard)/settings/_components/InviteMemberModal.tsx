@@ -35,12 +35,17 @@ export function InviteMemberModal({
   availableTypes,
   selfHosted,
   initialMailSource,
+  isPersonalOrg,
   onInvited,
   onClose,
 }: {
   availableTypes: ResourceType[];
   selfHosted: boolean;
   initialMailSource: MailSource;
+  /** Personal workspaces can't invite — the backend rejects with a raw
+   *  "not allowed" error, so we intercept and guide the user to create a
+   *  team organization first. */
+  isPersonalOrg: boolean;
   onInvited: () => void;
   onClose: () => void;
 }) {
@@ -70,6 +75,16 @@ export function InviteMemberModal({
 
   const handleInvite = async () => {
     if (!email.trim()) return;
+    // Personal workspaces can't hold other members — short-circuit with clear
+    // guidance instead of letting the backend return a raw "not allowed" error.
+    if (isPersonalOrg) {
+      showToast(
+        t.settings.inviteMember.toast.personalOrgBlocked,
+        "error",
+        t.settings.common.toast.invitation,
+      );
+      return;
+    }
     setInviting(true);
     try {
       if (role === "restricted" && grants.length > 0) {

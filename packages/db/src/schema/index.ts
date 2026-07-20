@@ -1,6 +1,8 @@
 export { user, session, account, verification } from "./auth";
 export { organization, member, invitation } from "./organization";
 export { auditEvent } from "./audit-event";
+export { jobRun } from "./job-run";
+export { job } from "./job";
 export { orphanedResource } from "./orphaned-resource";
 export { resourceGrant } from "./resource-grant";
 export { invitationPendingGrant } from "./invitation-pending-grant";
@@ -9,12 +11,15 @@ export { githubInstallState } from "./github-install-state";
 export { projectApp, project, envVar } from "./project";
 export { deployment, buildSession } from "./deployment";
 export { domain } from "./domain";
+export { routeRule } from "./route-rule";
+export { systemNotice } from "./system-notice";
 export { cloudWebhookBinding } from "./cloud-webhook-binding";
 export { githubWebhookEvent } from "./github-webhook-event";
 export { service, serviceDeployment } from "./service";
 export { deploymentCheckRun } from "./deployment-check-run";
 export { userSettings, instanceSettings } from "./settings";
 export { servers } from "./servers";
+export { serverGithubAuth, githubDeployKey } from "./server-github";
 export { serverTunnels } from "./server-tunnel";
 export { mailServers } from "./mail";
 export { serverAnalytics, serverAnalyticsGeo } from "./analytics";
@@ -30,6 +35,7 @@ export {
   backupRun,
   backupRestore,
 } from "./backup";
+export { dockerMigrationRun } from "./docker-migration";
 export {
   notificationChannel,
   notificationSubscription,

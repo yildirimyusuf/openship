@@ -45,15 +45,21 @@ export const Deployments = () => {
     }
   };
 
-  // "Project outdated" banner: branch HEAD vs the active deployment's commit.
-  // Fetched on-demand; conservative (only shows when we positively know the
-  // deployed commit is behind the remote HEAD).
+  // "Project outdated" banner. Two shapes discriminated by `mode`: a commit
+  // project is behind its branch HEAD; a release/dist project has a newer
+  // version available. Fetched on-demand; conservative (only shows when we
+  // positively know the deploy is behind and nothing is already in flight).
   const [commitStatus, setCommitStatus] = React.useState<{
     behind: boolean;
+    mode: "commit" | "release";
+    /* commit */
     branch?: string;
     latestSha?: string | null;
     latestMessage?: string | null;
     deployedSha?: string | null;
+    /* release */
+    latestVersion?: string | null;
+    currentVersion?: string | null;
   } | null>(null);
 
   React.useEffect(() => {
@@ -64,16 +70,19 @@ export const Deployments = () => {
       .then((res) => {
         if (cancelled) return;
         const s = res?.data;
-        // Set when behind HEAD (and not already in flight), else CLEAR — must be
+        // Set when behind (and not already in flight), else CLEAR — must be
         // able to remove a stale banner, not only add one.
         setCommitStatus(
           s?.supported && s.behind && !s.latestInProgress
             ? {
                 behind: true,
+                mode: s.mode ?? "commit",
                 branch: s.branch,
                 latestSha: s.latestSha,
                 latestMessage: s.latestMessage,
                 deployedSha: s.deployedSha,
+                latestVersion: s.latestVersion,
+                currentVersion: s.currentVersion,
               }
             : null,
         );
@@ -220,7 +229,7 @@ export const Deployments = () => {
               type="button"
               onClick={handleRetryRouting}
               disabled={isRetryingRoute}
-              className="rounded-lg bg-amber-600 px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-60"
+              className="rounded-lg bg-warning-solid px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-warning-solid/90 disabled:opacity-60"
             >
               {isRetryingRoute ? t.projects.routingRetry.retrying : t.projects.routingRetry.retry}
             </button>
@@ -240,7 +249,7 @@ export const Deployments = () => {
             <button
               type="button"
               onClick={() => router.push(`/build/${projectData.activeDeploymentId}`)}
-              className="rounded-lg bg-amber-600 px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-amber-700"
+              className="rounded-lg bg-warning-solid px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-warning-solid/90"
             >
               {t.projects.redeploy.reviewDeployment}
             </button>
@@ -250,7 +259,7 @@ export const Deployments = () => {
 
       {/* "Project outdated" nudge — only when the deployed commit is behind the
           branch HEAD. Redeploy uses the same direct path as the button below. */}
-      {commitStatus?.behind && (
+      {commitStatus?.behind && commitStatus.mode === "commit" && (
         <WarningCallout
           title={t.projects.redeploy.newCommitTitle}
           description={
@@ -281,6 +290,43 @@ export const Deployments = () => {
               className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
             >
               {isRedeploying ? t.projects.redeploy.deploying : t.projects.redeploy.redeployLatest}
+            </button>
+          }
+        />
+      )}
+
+      {/* Release/dist source: a newer version is available. Same direct deploy
+          path — triggerDeployment re-resolves the newest version server-side. */}
+      {commitStatus?.behind && commitStatus.mode === "release" && (
+        <WarningCallout
+          title={t.projects.redeploy.newVersionTitle}
+          description={
+            <>
+              {t.projects.redeploy.newVersionAvailable}{" "}
+              <span className="font-mono text-foreground/80">
+                v{commitStatus.latestVersion}
+              </span>
+              {commitStatus.currentVersion ? (
+                <>
+                  {" "}{t.projects.redeploy.newVersionDeployed}{" "}
+                  <span className="font-mono text-foreground/80">
+                    v{commitStatus.currentVersion}
+                  </span>
+                  .
+                </>
+              ) : (
+                "."
+              )}
+            </>
+          }
+          actions={
+            <button
+              type="button"
+              onClick={handleRedeploy}
+              disabled={isRedeploying}
+              className="rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+            >
+              {isRedeploying ? t.projects.redeploy.deploying : t.projects.redeploy.deployVersion}
             </button>
           }
         />

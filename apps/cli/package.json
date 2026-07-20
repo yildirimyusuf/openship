@@ -25,10 +25,13 @@
   ],
   "scripts": {
     "build": "tsup && bun run build/stage-server.ts",
+    "cli": "bun dist/index.js",
+    "dev": "bun run build && bun dist/index.js",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {
+    "@clack/prompts": "^0.11.0",
     "@repo/core": "workspace:*",
     "@repo/onboarding": "workspace:*",
     "commander": "^14.0.3",

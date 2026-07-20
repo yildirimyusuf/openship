@@ -6,7 +6,7 @@ export { withAdvisoryLock, hashStringToInt } from "./advisory-lock";
 
 // ─── Schema (table definitions) ──────────────────────────────────────────────
 export * as schema from "./schema";
-export type { ComposeServiceSpec } from "./schema/service";
+export type { ComposeServiceSpec, ServicePublicEndpoint } from "./schema/service";
 
 // ─── Dump / restore (team-mode migration + project transfer) ─────────────────
 export {
@@ -45,6 +45,8 @@ export {
   composeSpecDiff,
   createSettingsRepo,
   createServerRepo,
+  createServerGithubAuthRepo,
+  createGithubDeployKeyRepo,
   createServerTunnelRepo,
   createAnalyticsRepo,
   createTerminalSessionRepo,
@@ -80,6 +82,10 @@ export {
   type NewUserSettings,
   type Server,
   type NewServer,
+  type ServerGithubAuth,
+  type NewServerGithubAuth,
+  type GithubDeployKey,
+  type NewGithubDeployKey,
   type ServerTunnel,
   type NewServerTunnel,
   type ServerAnalyticsRow,
@@ -101,11 +107,20 @@ export {
   type NewBackupRestore,
   type BackupRunStatus,
   type BackupRestoreStatus,
+  type DockerMigrationRun,
+  type NewDockerMigrationRun,
+  type DockerMigrationStatus,
   type Member,
   type MemberRole,
   type Invitation,
   type AuditEvent,
   type NewAuditEvent,
+  createJobRunRepo,
+  type JobRun,
+  type NewJobRun,
+  createJobRepo,
+  type Job,
+  type NewJob,
   type OrphanedResource,
   type NewOrphanedResource,
   type ResourceGrant,

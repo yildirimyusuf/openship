@@ -7,6 +7,7 @@ import { defaultStatements } from "better-auth/plugins/organization/access";
 import { createAccessControl } from "better-auth/plugins/access";
 import { db, getDriver, repos, schema } from "@repo/db";
 import { env, runtimeTarget, trustedOrigins } from "../config/env";
+import { resolveAuthBaseUrl, resolveDashboardPublicUrl } from "./public-url";
 import { sendMail, smtpEnabled, requireEmailVerificationStrict } from "./mail";
 import {
   resetPasswordEmail,
@@ -64,6 +65,19 @@ const INVITE_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 export const COOKIE_PREFIX = env.CLOUD_MODE ? "openship-cloud" : "openship";
 
 function getSharedCookieDomain() {
+  // A localhost / single-label host (dev — including the local SaaS on :4100)
+  // can ONLY use host-only cookies: a browser rejects a `Domain=.foo` cookie
+  // (e.g. a leftover BETTER_AUTH_COOKIE_DOMAIN=.openship.io) on a `localhost`
+  // page, which silently drops the session and makes login loop. Force
+  // host-only there, IGNORING any configured domain, so a local SaaS always
+  // "treats itself as localhost". Real multi-label hosts fall through.
+  try {
+    const apiHost = new URL(runtimeTarget.api).hostname;
+    if (apiHost.split(".").filter(Boolean).length < 2) return undefined;
+  } catch {
+    // Unparseable target → fall through to the existing logic.
+  }
+
   if (env.BETTER_AUTH_COOKIE_DOMAIN) {
     return env.BETTER_AUTH_COOKIE_DOMAIN;
   }
@@ -93,7 +107,10 @@ const useSessionCookieCache = getDriver() !== "pglite";
 
 export const auth = betterAuth({
   basePath: "/api/auth",
-  baseURL: runtimeTarget.api,
+  // Dynamic when served on a public URL — every absolute OAuth/auth URL is built
+  // from the forwarded public host so remote MCP clients get reachable endpoints
+  // (see resolveAuthBaseUrl). Static runtimeTarget.api otherwise (cloud/dev).
+  baseURL: resolveAuthBaseUrl(),
 
   database: drizzleAdapter(db, {
     provider: "pg",
@@ -259,6 +276,13 @@ export const auth = betterAuth({
   /* ---------- Advanced ---------- */
   advanced: {
     cookiePrefix: COOKIE_PREFIX,
+    // Pin secure-cookie behavior when served on a public URL. The dynamic
+    // `baseURL` (an object) would otherwise make Better Auth derive `secure`
+    // from NODE_ENV (→ true in prod) instead of the previous static-localhost
+    // `false` — which renames the session cookie (`__Secure-` prefix, logging
+    // everyone out once) and breaks the pre-TLS HTTP window. Preserve today's
+    // exact behavior; secure-cookie hardening is a separate, deliberate change.
+    ...(env.OPENSHIP_PUBLIC_URL ? { useSecureCookies: false } : {}),
     ...(sharedCookieDomain
       ? {
           crossSubDomainCookies: {
@@ -302,10 +326,13 @@ export const auth = betterAuth({
      * PATs remain the API-key path for REST/CLI and still authenticate /api/mcp.
      */
     mcp({
-      loginPage: `${runtimeTarget.dashboard}/login`,
+      // Redirect targets on the DASHBOARD — the public dashboard origin when
+      // served publicly (a remote OAuth client must land on a reachable login/
+      // consent page, not localhost:3001), else the static runtime dashboard.
+      loginPage: `${resolveDashboardPublicUrl()}/login`,
       oidcConfig: {
-        loginPage: `${runtimeTarget.dashboard}/login`,
-        consentPage: `${runtimeTarget.dashboard}/mcp/authorize`,
+        loginPage: `${resolveDashboardPublicUrl()}/login`,
+        consentPage: `${resolveDashboardPublicUrl()}/mcp/authorize`,
         requirePKCE: true, // OAuth 2.1
         storeClientSecret: "hashed",
         allowDynamicClientRegistration: true, // MCP clients self-register

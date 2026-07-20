@@ -173,6 +173,28 @@ export function createDeploymentRepo(db: Database) {
       });
     },
 
+    /**
+     * The most recent in-flight (queued/building/deploying) deployment for a
+     * given release version — the release-source analog of
+     * findInProgressByCommit. Suppresses the "new version available" banner
+     * while that version is already being deployed, and dedupes the release
+     * webhook against an in-flight deploy of the same tag.
+     */
+    async findInProgressByReleaseVersion(
+      projectId: string,
+      releaseVersion: string | null | undefined,
+    ) {
+      if (!releaseVersion) return undefined;
+      return db.query.deployment.findFirst({
+        where: and(
+          eq(deployment.projectId, projectId),
+          eq(deployment.releaseVersion, releaseVersion),
+          inArray(deployment.status, ["queued", "building", "deploying"]),
+        ),
+        orderBy: [desc(deployment.createdAt)],
+      });
+    },
+
     async updateStatus(id: string, status: string, extra?: Partial<NewDeployment>) {
       await db
         .update(deployment)
@@ -321,6 +343,25 @@ export function createDeploymentRepo(db: Database) {
         if (!out.has(row.projectId)) out.set(row.projectId, row);
       }
       return out;
+    },
+
+    /**
+     * Home-dashboard counts for a set of projects: total deployments and how
+     * many shipped. "Shipped" mirrors getNextReadyVersion — `ready` and
+     * `partial_failure` (a shipped-with-asterisk release) both count as success.
+     */
+    async statsByProjects(
+      projectIds: string[],
+    ): Promise<{ total: number; success: number }> {
+      if (projectIds.length === 0) return { total: 0, success: 0 };
+      const [row] = await db
+        .select({
+          total: sql<number>`count(*)`,
+          success: sql<number>`count(*) filter (where ${deployment.status} in ('ready', 'partial_failure'))`,
+        })
+        .from(deployment)
+        .where(inArray(deployment.projectId, projectIds));
+      return { total: Number(row?.total ?? 0), success: Number(row?.success ?? 0) };
     },
 
     /** Bulk lookup by id — used by enrichProject batching. */

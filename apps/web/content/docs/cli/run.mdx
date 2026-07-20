@@ -26,6 +26,7 @@ openship status --json
 
 | Command | Purpose |
 |---|---|
+| `openship` (no args) | Guided first-run setup: deploy Openship, create your admin, print the login URL. |
 | `openship up` | Start the server as a persistent, auto-restarting service. |
 | `openship stop` | Stop that service. |
 | `openship update` | Update the CLI + bundled server to the latest release. |
@@ -35,11 +36,29 @@ openship status --json
 | `openship status` | Show the active context's API health and deployment info. |
 | `openship doctor` | Diagnose the CLI setup (config, context, runtime). |
 
+## `openship` — guided setup
+
+Run `openship` with **no arguments** for the interactive first-run setup. It asks whether the instance should
+be private (this machine only) or public (reachable from other machines), your domain and whether an HTTPS
+reverse proxy is in front (for public), and your **admin name, email, and password**. It then deploys via the
+same pipeline as `openship up`, creates your admin account, and prints the URL to sign in. This is the
+recommended way to stand up a new instance.
+
+```bash
+openship
+```
+
 ## `openship up`
 
 Starts Openship as a **persistent service** that starts on boot and auto-restarts if it crashes, then keeps
 running until you `openship stop`. The API is served at `/api` (default port `4000`) and the dashboard on
-port `3001`. On a local box, access over loopback needs no token.
+port `3001`.
+
+<Callout title="CLI instances always require login" type="info">
+Unlike the desktop app (which uses loopback zero-auth), an instance started from the CLI **always requires an
+email + password login**. Create the first admin with the `openship` guided setup above (or
+`openship system upgrade-to-auth`). Zero-auth is desktop-only.
+</Callout>
 
 ```bash
 # Start the service (API on :4000, dashboard on :3001)
@@ -61,11 +80,22 @@ openship up --dry-run
 | `--ui-version <tag>` | Dashboard release tag to run. | this CLI's version |
 | `-f`, `--foreground` | Run attached in this terminal instead of as a background service. | — |
 | `--dry-run` | Print the service definition that would be installed, then exit. | — |
+| `--public-url <url>` | Serve to the internet at this URL: binds the dashboard to all interfaces, proxies the API same-origin, and requires login. | — |
+| `--trust-proxy` | Trust the `X-Real-IP` set by a reverse proxy in front (the proxy MUST overwrite it with the real client IP, e.g. `proxy_set_header X-Real-IP $remote_addr`) — enables per-client rate limiting. | — |
+| `--managed-edge` | Install OpenResty + a free Let's Encrypt cert on this box and route `--public-url`'s domain to the dashboard — no separate reverse proxy needed. | — |
+| `--acme-email <email>` | Contact email for the Let's Encrypt certificates (managed edge). | — |
 
 <Callout title="The dashboard is downloaded on first run">
 Unless you pass `--no-ui`, the dashboard bundle is lazy-downloaded from GitHub releases the first time you run
 `openship up` and pinned to match the CLI version. If it can't be fetched, the API keeps serving on its own —
 retry `openship up`, pass `--no-ui`, or use `openship install` for the desktop app.
+</Callout>
+
+<Callout title="Serving to the internet" type="info">
+`--public-url https://ops.example.com` makes the dashboard reachable from other machines while keeping the API
+bound to loopback (only the dashboard's same-origin proxy reaches it — nothing but the dashboard is exposed).
+Put an HTTPS reverse proxy (Caddy, nginx, Cloudflare) in front of the dashboard port and add `--trust-proxy`.
+The guided `openship` setup walks you through all of this.
 </Callout>
 
 ## `openship stop`
@@ -79,9 +109,9 @@ openship stop
 
 ## `openship update`
 
-Updates the globally-installed CLI — which bundles the self-hosted server — to the latest published release.
-This checks GitHub releases (not your Openship API) and re-installs the global package with your package
-manager. After it finishes, restart the server so it runs the new version.
+Updates the globally-installed CLI — which bundles the self-hosted server — to the latest published release,
+then **restarts the running service** so you're immediately on the new version. It checks GitHub releases
+(not your Openship API) and re-installs the global package with your package manager.
 
 ```bash
 # Update to the latest release
@@ -99,9 +129,10 @@ openship update --via npm
 | `--check` | Only report the current + latest version; don't install. |
 | `--via <manager>` | Package manager to update with: `bun` or `npm` (default: `bun` if present, else `npm`). |
 
-<Callout title="Restart after updating">
-`openship update` swaps out the installed files but does not restart a running server. Run `openship up`
-again afterward to pick up the new version.
+<Callout title="Automatic restart">
+`openship update` restarts the installed service for you after updating, so you land on the new version
+immediately. If you're running attached with `openship up --foreground` (no service installed), it can't
+restart you — relaunch it yourself.
 </Callout>
 
 ## `openship install`

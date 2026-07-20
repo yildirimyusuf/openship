@@ -32,6 +32,14 @@ export interface UpFlags {
   /** false → pass --no-ui */
   ui?: boolean;
   uiVersion?: string;
+  /** Serve remotely at this public URL (enables proxy + login). */
+  publicUrl?: string;
+  /** Trust X-Forwarded-For from a front proxy. */
+  trustProxy?: boolean;
+  /** Managed edge: install OpenResty + Let's Encrypt on this box and route here. */
+  managedEdge?: boolean;
+  /** ACME contact email for the managed edge. */
+  acmeEmail?: string;
 }
 
 /** The CLI's own runtime + entry, so the service invokes THIS install. */
@@ -48,6 +56,10 @@ function upArgs(flags: UpFlags): string[] {
   if (flags.dashboardPort) a.push("--dashboard-port", flags.dashboardPort);
   if (flags.ui === false) a.push("--no-ui");
   if (flags.uiVersion) a.push("--ui-version", flags.uiVersion);
+  if (flags.publicUrl) a.push("--public-url", flags.publicUrl);
+  if (flags.trustProxy) a.push("--trust-proxy");
+  if (flags.managedEdge) a.push("--managed-edge");
+  if (flags.acmeEmail) a.push("--acme-email", flags.acmeEmail);
   return a;
 }
 
@@ -88,10 +100,23 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Extra env the service should carry. Only OPENSHIP_DASHBOARD_DIR today, and
+ *  only when set — lets `openship`/wizard run a locally-built dashboard for
+ *  pre-release testing; unset in production so nothing changes. */
+function serviceEnv(): Record<string, string> {
+  const extra: Record<string, string> = {};
+  const dashDir = process.env.OPENSHIP_DASHBOARD_DIR?.trim();
+  if (dashDir) extra.OPENSHIP_DASHBOARD_DIR = dashDir;
+  return extra;
+}
+
 function plist(flags: UpFlags): string {
   const argv = runArgv(flags);
   const items = argv.map((a) => `      <string>${xmlEscape(a)}</string>`).join("\n");
   const path = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", join(HOME, ".bun/bin")].join(":");
+  const extraEnv = Object.entries(serviceEnv())
+    .map(([k, v]) => `<key>${xmlEscape(k)}</key><string>${xmlEscape(v)}</string>`)
+    .join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -106,7 +131,7 @@ ${items}
   <key>StandardOutPath</key><string>${join(LOG_DIR, "up.log")}</string>
   <key>StandardErrorPath</key><string>${join(LOG_DIR, "up.err.log")}</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${path}</string></dict>
+  <dict><key>PATH</key><string>${path}</string>${extraEnv}</dict>
 </dict>
 </plist>
 `;
@@ -115,6 +140,9 @@ ${items}
 function systemdUnit(flags: UpFlags): string {
   const argv = runArgv(flags);
   const execStart = argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
+  const extraEnv = Object.entries(serviceEnv())
+    .map(([k, v]) => `Environment=${k}=${v}\n`)
+    .join("");
   return `[Unit]
 Description=Openship control plane
 After=network-online.target
@@ -126,7 +154,7 @@ ExecStart=${execStart}
 Restart=always
 RestartSec=2
 Environment=NODE_ENV=production
-
+${extraEnv}
 [Install]
 WantedBy=default.target
 `;
@@ -195,6 +223,40 @@ export function installAndStart(flags: UpFlags): ServiceResult {
   throw new Error(
     "No supported service manager found (need systemd on Linux). Run `openship up --foreground` instead, or use docker compose for always-on.",
   );
+}
+
+/**
+ * Restart the installed service in place (pick up a new bundle after
+ * `openship update`). Returns restarted:false when no service is installed —
+ * the caller then tells the operator to `openship up` manually.
+ */
+export function restart(): { restarted: boolean; detail: string } {
+  const kind = detectKind();
+
+  if (kind === "launchd") {
+    if (!existsSync(MAC_PLIST)) return { restarted: false, detail: "no launchd agent installed" };
+    const uid = String(process.getuid?.() ?? "");
+    const r = run("launchctl", ["kickstart", "-k", `gui/${uid}/${MAC_LABEL}`]);
+    return { restarted: r.ok, detail: r.ok ? `restarted ${MAC_LABEL}` : r.out };
+  }
+
+  if (kind === "systemd-user" || kind === "systemd-system") {
+    const sysArgs = kind === "systemd-user" ? ["--user"] : [];
+    const unitPath = kind === "systemd-user"
+      ? join(HOME, ".config/systemd/user", `${SYSTEMD_NAME}.service`)
+      : `/etc/systemd/system/${SYSTEMD_NAME}.service`;
+    if (!existsSync(unitPath)) return { restarted: false, detail: "no systemd unit installed" };
+    const r = run("systemctl", [...sysArgs, "restart", SYSTEMD_NAME]);
+    return { restarted: r.ok, detail: r.ok ? `restarted ${SYSTEMD_NAME}` : r.out };
+  }
+
+  if (kind === "schtasks") {
+    run("schtasks", ["/End", "/TN", WIN_TASK]);
+    const r = run("schtasks", ["/Run", "/TN", WIN_TASK]);
+    return { restarted: r.ok, detail: r.ok ? `restarted ${WIN_TASK}` : r.out };
+  }
+
+  return { restarted: false, detail: "no supported service manager" };
 }
 
 /** Stop AND disable the service — it won't restart or return on reboot. */

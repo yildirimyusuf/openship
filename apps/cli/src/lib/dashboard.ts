@@ -36,6 +36,22 @@ export interface DashboardBundle {
 export async function ensureDashboard(
   opts: { tag?: string; onProgress?: (received: number, total: number) => void } = {},
 ): Promise<DashboardBundle> {
+  // Local override for testing an UNPUBLISHED build (dev / pre-release / CI):
+  // point at a locally-built Next standalone dir instead of downloading from
+  // GitHub. Expects the monorepo-rooted layout <dir>/apps/dashboard/server.js
+  // (i.e. apps/dashboard/.next/standalone). No checksum — it's your own build.
+  const override = process.env.OPENSHIP_DASHBOARD_DIR?.trim();
+  if (override) {
+    const cwd = join(override, "apps", "dashboard");
+    const entry = join(cwd, "server.js");
+    if (!existsSync(entry)) {
+      throw new Error(
+        `OPENSHIP_DASHBOARD_DIR=${override} but ${entry} is missing — build the dashboard standalone first (see docs).`,
+      );
+    }
+    return { tag: "local", entry, cwd };
+  }
+
   const tag = opts.tag ?? (await resolveLatestTag());
   const dir = join(DASHBOARD_CACHE, tag);
   const cwd = join(dir, "apps", "dashboard");

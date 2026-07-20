@@ -3,10 +3,21 @@
  */
 
 import { repos, type Deployment, type NewProject, type Project, type Server } from "@repo/db";
-import { slugify, NotFoundError, ConflictError, ValidationError, SYSTEM, safeErrorMessage } from "@repo/core";
+import {
+  slugify,
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+  SYSTEM,
+  safeErrorMessage,
+  compareSemver,
+  isReleaseProvider,
+  type ReleaseSource,
+} from "@repo/core";
 import type { ResourceConfig } from "@repo/adapters";
 import { encodeResources } from "../../lib/resources";
 import { normalizeRollbackWindow } from "../../lib/release-retention";
+import { resolveLatestVersion, readApiVersion } from "../../lib/release-dist";
 import { env } from "../../config";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
@@ -98,6 +109,7 @@ export async function enrichProject(p: Project) {
   return {
     ...p,
     deployTarget,
+    serverId,
     serverName,
     ...readActiveDeploymentSummary(activeDep),
     resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000),
@@ -153,6 +165,7 @@ export async function enrichProjectsBatch(
     return {
       ...p,
       deployTarget,
+      serverId,
       serverName,
       ...readActiveDeploymentSummary(activeDep),
       resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000),
@@ -165,16 +178,22 @@ function projectGitUrl(owner?: string | null, repo?: string | null) {
 }
 
 function resolveProjectSource(data: TCreateProjectBody) {
-  const safeLocalPath = data.localPath && !env.CLOUD_MODE ? data.localPath : undefined;
-  const gitOwner = safeLocalPath ? undefined : data.gitOwner;
-  const gitRepo = safeLocalPath ? undefined : data.gitRepo;
+  // Release/dist source: a prebuilt dist, no git repo and no stored localPath
+  // (its dir is resolved per-deploy). The source repo, if any, lives in
+  // releaseSource — the project-level gitOwner/gitRepo columns stay null so the
+  // commit-drift path is never taken for it.
+  const isRelease = isReleaseProvider(data.gitProvider);
+  const safeLocalPath = !isRelease && data.localPath && !env.CLOUD_MODE ? data.localPath : undefined;
+  const gitOwner = isRelease || safeLocalPath ? undefined : data.gitOwner;
+  const gitRepo = isRelease || safeLocalPath ? undefined : data.gitRepo;
 
   return {
     safeLocalPath,
     gitOwner,
     gitRepo,
-    gitProvider: safeLocalPath ? "local" : (data.gitProvider ?? "github"),
+    gitProvider: isRelease ? "release" : safeLocalPath ? "local" : (data.gitProvider ?? "github"),
     gitUrl: projectGitUrl(gitOwner, gitRepo),
+    releaseSource: isRelease ? ((data.releaseSource as ReleaseSource | undefined) ?? null) : null,
   };
 }
 
@@ -239,6 +258,7 @@ function buildProductionProjectInput(
     gitRepo: source.gitRepo,
     gitBranch: data.gitBranch ?? "main",
     gitUrl: source.gitUrl,
+    releaseSource: source.releaseSource,
     installationId: data.installationId,
     autoDeploy: !!(env.CLOUD_MODE && source.gitOwner && source.gitRepo),
     framework: data.framework ?? "unknown",
@@ -262,6 +282,8 @@ function buildProductionProjectInput(
     rollbackWindow:
       data.rollbackWindow !== undefined ? normalizeRollbackWindow(data.rollbackWindow) : null,
     cloudArchiveStrategy: data.cloudArchiveStrategy ?? undefined,
+    isApp: data.isApp ?? false,
+    appTemplateId: data.appTemplateId ?? null,
   };
 }
 
@@ -678,12 +700,21 @@ export async function updateProject(
     const beforeState = await resolveProjectRouteState(p).catch(() => null);
     const previousHostnames = beforeState?.projectDomains.map((d) => d.hostname) ?? [];
 
-    await syncProjectRouteState(p, {
-      nextPublicEndpoints: data.publicEndpoints,
-      slug: typeof update.slug === "string" ? update.slug : p.slug,
-    }).catch((err) =>
-      console.warn(`[updateProject] route sync failed (non-fatal): ${safeErrorMessage(err)}`),
-    );
+    // Best-effort ONLY for incidental re-syncs (a slug/port edit) — the field
+    // edit is already committed and the next deploy re-syncs routes. But when
+    // the caller EXPLICITLY sent publicEndpoints, the domain add/edit IS the
+    // operation: swallowing a failure here would return success while nothing
+    // was persisted (silent drop). Fail loudly so the real reason (e.g. a slug
+    // conflict) surfaces to the user instead of a false success.
+    try {
+      await syncProjectRouteState(p, {
+        nextPublicEndpoints: data.publicEndpoints,
+        slug: typeof update.slug === "string" ? update.slug : p.slug,
+      });
+    } catch (err) {
+      if (data.publicEndpoints !== undefined) throw err;
+      console.warn(`[updateProject] route sync failed (non-fatal): ${safeErrorMessage(err)}`);
+    }
 
     // Re-apply the live route so a domain/port edit takes effect without a
     // redeploy (best-effort — the DB rows are already committed).
@@ -860,6 +891,16 @@ export async function createProjectEnvironment(
  * rate limit) or a project with no successful deploy yet reports `behind:false`
  * so we never show a false "outdated" nudge.
  */
+/**
+ * Source-drift status for the "your deploy is behind — redeploy" dashboard
+ * nudge. Dispatches on the project's source shape and returns a `mode`-tagged
+ * union so the client can render the right banner:
+ *   - commit  → git-backed: compares the branch HEAD sha against the deployed sha
+ *   - release → release/dist: compares the newest advertised semver against the
+ *               deployed release version ("new version available vX→vY")
+ * Unsupported sources (local, upload, git project with no owner/repo) return
+ * `{ supported:false }` and the banner stays hidden.
+ */
 export async function getProjectCommitStatus(
   ctx: RequestContext,
   projectId: string,
@@ -868,7 +909,11 @@ export async function getProjectCommitStatus(
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
 
-  // Only GitHub-backed projects have a remote branch HEAD to compare against.
+  if (isReleaseProvider(p.gitProvider)) {
+    return getReleaseDriftStatus(p);
+  }
+
+  // Commit-source: only GitHub-backed projects have a remote branch HEAD to compare against.
   if (!p.gitOwner || !p.gitRepo) {
     return { supported: false as const };
   }
@@ -894,12 +939,59 @@ export async function getProjectCommitStatus(
 
   return {
     supported: true as const,
+    mode: "commit" as const,
     behind,
     latestInProgress,
     branch,
     latestSha,
     latestMessage: head?.message ?? null,
     deployedSha,
+  };
+}
+
+/**
+ * Release/dist drift: compare the newest advertised version (github latest
+ * release tag, or a `versionUrl`) against the deployed release version. A
+ * `pinnedVersion` source has no drift — it's fixed. The self-app (openship
+ * template) never deploys through the pipeline, so its `current` falls back to
+ * the running API's own version.
+ */
+async function getReleaseDriftStatus(p: Project) {
+  const source = (p.releaseSource as ReleaseSource | null) ?? null;
+  if (!source) return { supported: false as const };
+
+  let current: string | null = null;
+  if (p.activeDeploymentId) {
+    const dep = await repos.deployment.findById(p.activeDeploymentId).catch(() => null);
+    current = dep?.releaseVersion ?? null;
+  }
+  if (!current && p.appTemplateId === "openship") {
+    current = readApiVersion();
+  }
+
+  const latest = source.pinnedVersion
+    ? source.pinnedVersion.replace(/^v/, "")
+    : await resolveLatestVersion(source);
+
+  const behind = Boolean(latest && current && compareSemver(latest, current) > 0);
+
+  const latestInProgress =
+    behind && latest
+      ? Boolean(
+          await repos.deployment
+            .findInProgressByReleaseVersion(p.id, latest)
+            .catch(() => undefined),
+        )
+      : false;
+
+  return {
+    supported: true as const,
+    mode: "release" as const,
+    behind,
+    latestInProgress,
+    latestVersion: latest,
+    currentVersion: current,
+    pinned: Boolean(source.pinnedVersion),
   };
 }
 

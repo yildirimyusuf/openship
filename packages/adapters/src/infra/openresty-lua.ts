@@ -44,6 +44,9 @@ export const OPENRESTY_LUA_DIR = "/usr/local/openresty/site/lualib/openship";
 /** Absolute path to the site_logger script (referenced by nginx server blocks). */
 export const LUA_LOGGER_PATH = `${OPENRESTY_LUA_DIR}/site_logger.lua`;
 
+/** Absolute path to the access-phase rules guard (referenced by server blocks). */
+export const RULES_GUARD_PATH = `${OPENRESTY_LUA_DIR}/rules_guard.lua`;
+
 /** Management API port - loopback only, queried via SSH tunnel. */
 export const OPENRESTY_MGMT_PORT = 9145;
 
@@ -293,6 +296,8 @@ const LUA_SCRIPTS = [
   "pipe_stream.lua",
   "mgmt_api.lua",
   "geo_country.lua",
+  "rules_lib.lua",
+  "rules_guard.lua",
 ] as const;
 
 /**
@@ -395,6 +400,14 @@ export async function deployLuaScripts(
   await executor.exec(
     `grep -q 'lua_shared_dict request_data ' ${paths.confPath} || ` +
       `sed -i '/http *{/a \\    lua_shared_dict request_data 128m;' ${paths.confPath}`,
+  );
+
+  // Shared dict: per-route rules cache - bans + rate-limit counters (32 MB).
+  // Written reload-free by mgmt_api `POST /rules`, read by rules_guard.lua in
+  // the access phase. The DB (route_rule table) is the source of truth.
+  await executor.exec(
+    `grep -q 'lua_shared_dict rules ' ${paths.confPath} || ` +
+      `sed -i '/http *{/a \\    lua_shared_dict rules 32m;' ${paths.confPath}`,
   );
 
   // Lua module search path (OpenResty default + openship modules)

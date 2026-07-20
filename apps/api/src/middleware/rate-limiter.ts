@@ -29,6 +29,7 @@ import { isLoopbackPeer, peerAddress } from "./loopback-peer";
 import { rateLimit, type PolicyId } from "../lib/rate-limit";
 import { POLICIES } from "../lib/rate-limit/policies";
 import { getRequestContext } from "../lib/request-context";
+import { env } from "../config";
 
 function resolveSubjectId(
   c: Context,
@@ -57,6 +58,22 @@ function resolveSubjectId(
 }
 
 async function enforce(c: Context, policyId: PolicyId): Promise<Response | null> {
+  // Local dev / on-host: a loopback connection with NO trusted proxy in front
+  // is the operator or the dev server itself — never rate-limit it. Otherwise
+  // EVERY dev request buckets under 127.0.0.1 and 429s en masse (the dashboard
+  // fires many github/home + get-session + health/env calls per render). SaaS
+  // sets TRUST_PROXY and limits by the real X-Forwarded-For client instead, so
+  // this exemption can't fire there (the proxy peer is loopback but TRUST_PROXY
+  // is on → we fall through and limit by client IP).
+  //
+  // CRITICAL: never exempt on a PUBLICLY-SERVED instance. Under `--public-url`
+  // without `--trust-proxy` the API is loopback-only behind the dashboard's
+  // same-origin proxy, so EVERY internet request arrives from a loopback peer —
+  // exempting it would disable ALL throttling, including the auth-tight
+  // login/brute-force gate. Fall through instead: resolveSubjectId buckets the
+  // proxied traffic under one loopback key so the limits still fire.
+  if (!env.TRUST_PROXY && !env.OPENSHIP_PUBLIC_URL && isLoopbackPeer(peerAddress(c))) return null;
+
   const policy = POLICIES[policyId];
   const subjectId = resolveSubjectId(c, policy.subject);
   if (!subjectId) {

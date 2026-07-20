@@ -201,6 +201,21 @@ export const userSettings = pgTable("user_settings", {
   cloneStrategyPreference: text("clone_strategy_preference").notNull().default("prompt"),
 
   /**
+   * Volume-transfer strategy for migrations / server-to-server moves.
+   *   "auto"   → topology-aware (direct on same daemon, stream cross-host)
+   *   "stream" → always tar-stream (streamPath → receiveStream)
+   *   "direct" → single-helper same-daemon copy (falls back to stream cross-host)
+   *   "rsync"  → reserved; falls back to stream until delta-rsync ships
+   */
+  transferMode: text("transfer_mode").notNull().default("auto"),
+  /**
+   * Compression for the stream path.
+   *   "auto" → none on same host, gzip cross-host
+   *   "zstd" | "gzip" | "none" → forced (zstd needs helper egress to fetch the codec)
+   */
+  transferCompression: text("transfer_compression").notNull().default("auto"),
+
+  /**
    * Local-mode gh-CLI suppression. In `cli` auth mode the API falls back to
    * the host's `gh auth token` when no OAuth row is stored. That makes
    * Disconnect feel broken because gh silently re-authenticates. When this

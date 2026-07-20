@@ -113,10 +113,13 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
   free: {
     id: "free",
     name: "Free",
-    description: "Get started with 500 credits per month",
+    description: "Get started for free",
     price: { monthly: 0, annual: 0 },
     stripePriceId: { monthly: null, annual: null },
-    monthlyCredits: 500_000, // milli-credits
+    // Paid tiers below are `null` (price + credits) until Openship Cloud pricing
+    // is finalized — the UI renders "coming soon". Self-hosted is free and never
+    // surfaces any of these numbers.
+    monthlyCredits: null,
     oblienLimits: {
       max_workspaces: 1,
       max_vcpus: 2,
@@ -124,7 +127,6 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
       max_disk_gb: 10,
     },
     features: [
-      "500 credits/mo",
       "1 workspace",
       "Community support",
     ],
@@ -135,12 +137,12 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
     id: "pro",
     name: "Pro",
     description: "For solo builders shipping production workloads",
-    price: { monthly: 20_00, annual: 192_00 }, // cents (20% annual discount)
+    price: { monthly: null, annual: null }, // coming soon
     stripePriceId: {
       monthly: process.env.STRIPE_PRICE_PRO_MONTHLY ?? "price_pro_monthly_placeholder",
       annual: process.env.STRIPE_PRICE_PRO_ANNUAL ?? "price_pro_annual_placeholder",
     },
-    monthlyCredits: 5_000_000,
+    monthlyCredits: null,
     oblienLimits: {
       max_workspaces: 10,
       max_vcpus: 16,
@@ -148,7 +150,6 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
       max_disk_gb: 100,
     },
     features: [
-      "5,000 credits/mo",
       "Up to 10 workspaces",
       "Email support",
     ],
@@ -159,12 +160,12 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
     id: "team",
     name: "Team",
     description: "For teams collaborating on shared infra",
-    price: { monthly: 50_00, annual: 480_00 },
+    price: { monthly: null, annual: null }, // coming soon
     stripePriceId: {
       monthly: process.env.STRIPE_PRICE_TEAM_MONTHLY ?? "price_team_monthly_placeholder",
       annual: process.env.STRIPE_PRICE_TEAM_ANNUAL ?? "price_team_annual_placeholder",
     },
-    monthlyCredits: 25_000_000,
+    monthlyCredits: null,
     oblienLimits: {
       max_workspaces: 50,
       max_vcpus: 64,
@@ -172,7 +173,6 @@ export const PLANS: Record<PlanTierId, PlanDefinition> = {
       max_disk_gb: 500,
     },
     features: [
-      "25,000 credits/mo",
       "Up to 50 workspaces",
       "Team collaboration",
       "Priority email support",

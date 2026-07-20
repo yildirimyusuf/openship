@@ -77,8 +77,8 @@ function pctUsed(used: number, limit: number): number {
 }
 
 function ringStrokeClass(pct: number): string {
-  if (pct >= 90) return "text-red-500";
-  if (pct >= 75) return "text-amber-500";
+  if (pct >= 90) return "text-danger";
+  if (pct >= 75) return "text-warning";
   return "text-primary";
 }
 
@@ -93,8 +93,8 @@ function daysUntil(end: Date | string | null): number | null {
 
 function statusPillClass(status: string): string {
   const s = status.toLowerCase();
-  if (s === "active") return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20";
-  if (s === "past_due" || s === "unpaid") return "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20";
+  if (s === "active") return "bg-success-bg text-success border-success-border";
+  if (s === "past_due" || s === "unpaid") return "bg-danger-bg text-danger border-danger-border";
   if (s === "canceled" || s === "cancelled") return "bg-muted text-muted-foreground border-border";
   return "bg-muted text-muted-foreground border-border";
 }
@@ -107,7 +107,7 @@ function statusPillClass(status: string): string {
  * Circular usage indicator. Built with SVG so it scales cleanly and
  * doesn't pull in a chart library for one shape. Stroke color comes
  * from the parent via `currentColor`; pass the right text-color class
- * (text-primary / text-amber-500 / text-red-500) based on threshold.
+ * (text-primary / text-warning / text-danger) based on threshold.
  */
 function RingGauge({
   pct,

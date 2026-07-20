@@ -17,8 +17,11 @@ import { authRoutes } from "./modules/auth/auth.routes";
 import { auth } from "./lib/auth";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata } from "better-auth/plugins";
 import { projectRoutes } from "./modules/projects/project.routes";
+import { appRoutes } from "./modules/apps/app.routes";
 import { deploymentRoutes } from "./modules/deployments/deployment.routes";
 import { domainRoutes } from "./modules/domains/domain.routes";
+import { jobRoutes } from "./modules/jobs/job.routes";
+import { noticeRoutes } from "./modules/notices/notice.routes";
 import { serviceRoutes } from "./modules/services/service.routes";
 import { analyticsRoutes } from "./modules/analytics/analytics.routes";
 import { billingPlansRoutes } from "./modules/billing/billing.routes";
@@ -37,12 +40,7 @@ import { permissionsRoutes } from "./modules/permissions/permissions.routes";
 import { backupWebhookRoutes } from "./modules/backups/webhook.routes";
 import { backupDestinationRoutes } from "./modules/backup-destinations/destination.routes";
 import { reconcileAllSchedules } from "./modules/backups/triggers/cron";
-import { scheduleRetentionPrune } from "./modules/backups/retention-prune";
-import { scheduleAuditPrune } from "./modules/audit/audit-prune-schedule";
-import { schedulePendingGrantPrune } from "./modules/permissions/pending-grant-prune-schedule";
-import { scheduleOrphanGc } from "./modules/projects/orphan-gc-schedule";
-import { scheduleReconcile } from "./modules/deployments/reconcile-schedule";
-import { scheduleWebhookEventPrune } from "./modules/github/webhook-event-prune-schedule";
+import { reconcileJobs } from "./modules/jobs/job.service";
 import { scheduleBillingAnniversary } from "./modules/billing/billing-anniversary.cron";
 import { backupOrchestrator } from "./modules/backups/backup.orchestrator";
 import { getJobRunner } from "./lib/job-runner";
@@ -114,6 +112,7 @@ app.use("/api/auth/mcp/authorize", forceMcpConsent);
 app.route("/api/health", healthRoutes);
 app.route("/api/auth", authRoutes);
 app.route("/api/projects", projectRoutes);
+app.route("/api/apps", appRoutes);
 app.route("/api/projects/:id/services", serviceRoutes);
 app.route("/api/deployments", deploymentRoutes);
 app.route("/api/domains", domainRoutes);
@@ -131,6 +130,10 @@ app.route("/api/webhooks/backup", backupWebhookRoutes);
 app.route("/api/audit", auditRoutes);
 app.route("/api/permissions", permissionsRoutes);
 app.route("/api/notifications", notificationsRoutes);
+app.route("/api/jobs", jobRoutes);
+// Platform status notices — banner feed (public read) + operator push (internal).
+// Both modes; primarily consumed on the SaaS.
+app.route("/api/notices", noticeRoutes);
 
 /* ---------- OAuth 2.1 discovery (MCP) ---------- */
 // The mcp() plugin serves these under /api/auth, but MCP/OAuth 2.1 clients look
@@ -198,6 +201,10 @@ if (env.CLOUD_MODE) {
   const { mailRoutes } = await import("./modules/mail/mail.routes");
   app.route("/api/mail", mailRoutes);
 
+  /** Docker migration - inspect a server's Docker and adopt it as a project */
+  const { migrationRoutes } = await import("./modules/migration/migration.routes");
+  app.route("/api/migration", migrationRoutes);
+
   /**
    * Interactive SERVER terminal (xterm.js ↔ WebSocket ↔ ssh2 PTY).
    * Self-hosted only — exposes the host's SSH-managed servers.
@@ -256,35 +263,14 @@ if (env.CLOUD_MODE) {
   });
   console.log(`[boot] backup runner: ${runner.describe()}`);
 
-  // Daily retention sweep — idempotent registration.
-  void scheduleRetentionPrune().catch((err) =>
-    console.warn("[boot] scheduleRetentionPrune failed:", err),
-  );
-
-  // Daily audit-log prune (per-org retention window).
-  void schedulePendingGrantPrune().catch((err) =>
-    console.warn("[boot] schedulePendingGrantPrune failed:", err),
-  );
-
-  void scheduleAuditPrune().catch((err) =>
-    console.warn("[boot] scheduleAuditPrune failed:", err),
-  );
-
-  // Daily prune of the github_webhook_event idempotency table (7-day window).
-  void scheduleWebhookEventPrune().catch((err) =>
-    console.warn("[boot] scheduleWebhookEventPrune failed:", err),
-  );
-
-  // Hourly GC of resources orphaned by an enforced (server-unreachable) delete.
-  void scheduleOrphanGc().catch((err) =>
-    console.warn("[boot] scheduleOrphanGc failed:", err),
-  );
-
-  // Every 10 min: settle deployments left `reconciling` by a connection-loss
-  // deploy, once their host is reachable again.
-  void scheduleReconcile().catch((err) =>
-    console.warn("[boot] scheduleReconcile failed:", err),
-  );
+  // Generic job schedule: seed built-in system jobs (SSL renewal, orphan GC,
+  // prunes, deployment reconcile) into the `job` table and register every
+  // enabled row on the runner. Operator cron/enabled overrides survive restarts.
+  void reconcileJobs()
+    .then((stats) =>
+      console.log(`[boot] jobs: ${stats.registered}/${stats.total} scheduled`),
+    )
+    .catch((err) => console.warn("[boot] reconcileJobs failed:", err));
 
   // Hourly billing-period rollover — re-arms Oblien quota for orgs
   // whose current_period_end has passed (safety net for paid orgs

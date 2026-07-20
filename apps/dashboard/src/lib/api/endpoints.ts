@@ -18,10 +18,14 @@ export const endpoints = {
     info: (id: string | number) => `projects/${id}/info`,
     environments: (id: string | number) => `projects/${id}/environments`,
     options: (id: string | number) => `projects/${id}/options`,
+    portCheck: (id: string | number) => `projects/${id}/port-check`,
+    outputCheck: (id: string | number) => `projects/${id}/output-check`,
     toggle: (id: string | number, action: "enable" | "disable") => `projects/${id}/${action}`,
     retryRouting: (id: string | number) => `projects/${id}/routing/retry`,
     clearCache: (id: string | number) => `projects/${id}/clear-cache`,
     clearBuild: (id: string | number) => `projects/${id}/clear-build`,
+    routeRules: (id: string | number) => `projects/${id}/route-rules`,
+    routeRule: (id: string | number, ruleId: string) => `projects/${id}/route-rules/${ruleId}`,
     deploymentSession: (id: string | number) => `projects/${id}/deployment-session`,
     connect: (id: string | number) => `projects/${id}/connect`,
     env: (id: string | number) => `projects/${id}/env`,
@@ -44,6 +48,14 @@ export const endpoints = {
     folderSession: "projects/folder/session",
     folderScan: (sessionId: string) => `projects/folder/scan/${sessionId}`,
     folderUpload: (sessionId: string) => `projects/folder/upload/${sessionId}`,
+  },
+
+  /* ---------------------------------------------------------------- */
+  /*  Apps (one-click catalog installs)                               */
+  /* ---------------------------------------------------------------- */
+  apps: {
+    catalog: "apps/catalog",
+    install: "apps",
   },
 
   /* ---------------------------------------------------------------- */
@@ -88,6 +100,7 @@ export const endpoints = {
     delete: (id: string) => `deployments/${id}`,
     reject: (id: string) => `deployments/${id}/reject`,
     keep: (id: string) => `deployments/${id}/keep`,
+    skipPortCheck: (id: string) => `deployments/${id}/skip-port-check`,
     rollback: (id: string) => `deployments/${id}/rollback`,
     cancel: (id: string) => `deployments/${id}/cancel`,
     prepare: "deployments/prepare",
@@ -107,7 +120,24 @@ export const endpoints = {
     preview: "domains/preview",
     verify: (id: string) => `domains/${encodeURIComponent(id)}/verify`,
     verifySsl: (id: string) => `domains/${encodeURIComponent(id)}/verify-ssl`,
+    certificate: (id: string) => `domains/${encodeURIComponent(id)}/certificate`,
     primary: (id: string) => `domains/${encodeURIComponent(id)}/primary`,
+    records: (id: string) => `domains/${encodeURIComponent(id)}/records`,
+  },
+
+  /* ---------------------------------------------------------------- */
+  /*  Jobs (self-hosted scheduled tasks)                              */
+  /* ---------------------------------------------------------------- */
+  jobs: {
+    list: "jobs",
+    triggerEvents: "jobs/trigger-events",
+    backupSchedules: "jobs/backup-schedules",
+    detail: (key: string) => `jobs/${encodeURIComponent(key)}`,
+    update: (key: string) => `jobs/${encodeURIComponent(key)}`,
+    runs: (key: string) => `jobs/${encodeURIComponent(key)}/runs`,
+    run: (key: string) => `jobs/${encodeURIComponent(key)}/run`,
+    runDetail: (runId: string) => `jobs/runs/${encodeURIComponent(runId)}`,
+    runStream: (runId: string) => `jobs/runs/${encodeURIComponent(runId)}/stream`,
   },
 
   /* ---------------------------------------------------------------- */
@@ -192,16 +222,26 @@ export const endpoints = {
     browse: "system/browse",
     settings: "system/settings",
     onboarding: "system/onboarding",
+    onboardingTestConnection: "system/onboarding/test-connection",
     testConnection: "system/test-connection",
     check: "system/check",
     install: "system/install",
     remove: "system/remove",
     installStream: "system/install/stream",
+    installRespond: "system/install/respond",
     installSession: "system/install/session",
     monitorStream: "system/monitor/stream",
     servers: "system/servers",
     server: (id: string) => `system/servers/${id}`,
+    serverReachability: (id: string) => `system/servers/${id}/reachability`,
     serverRateLimit: (id: string) => `system/servers/${id}/rate-limit`,
+    // Per-server GitHub auth (self-hosted)
+    serverGithub: (id: string) => `system/servers/${id}/github`,
+    serverGithubConnect: (id: string) => `system/servers/${id}/github/connect`,
+    serverGithubConnectPoll: (id: string) => `system/servers/${id}/github/connect/poll`,
+    serverGithubToken: (id: string) => `system/servers/${id}/github/token`,
+    serverGithubSshKey: (id: string) => `system/servers/${id}/github/ssh-key`,
+    serverGithubDeployKeyMode: (id: string) => `system/servers/${id}/github/deploy-key-mode`,
     // Port-forward tunnels (desktop-only)
     tunnels: (serverId: string) => `system/servers/${serverId}/tunnels`,
     tunnelStart: (serverId: string, tunnelId: string) =>
@@ -291,6 +331,18 @@ export const endpoints = {
   },
 
   /* ---------------------------------------------------------------- */
+  /*  Docker migration (inspect + adopt an existing Docker server)    */
+  /* ---------------------------------------------------------------- */
+  dockerMigration: {
+    scan: "migration/scan",
+    adopt: "migration/adopt",
+    preview: "migration/preview",
+    migrate: "migration/migrate",
+    migration: (id: string) => `migration/migrations/${id}`,
+    cutover: (id: string) => `migration/migrations/${id}/cutover`,
+  },
+
+  /* ---------------------------------------------------------------- */
   /*  Settings (user platform preferences)                            */
   /* ---------------------------------------------------------------- */
   settings: {
@@ -355,6 +407,7 @@ export const endpoints = {
     update: (id: string) => `backup-destinations/${id}`,
     delete: (id: string) => `backup-destinations/${id}`,
     preflight: (id: string) => `backup-destinations/${id}/preflight`,
+    usage: (id: string) => `backup-destinations/${id}/usage`,
   },
 
   /* ---------------------------------------------------------------- */

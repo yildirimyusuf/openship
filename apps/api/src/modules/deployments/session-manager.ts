@@ -11,6 +11,7 @@
 import { SYSTEM } from "@repo/core";
 import { TtlCache } from "../../lib/cache";
 import type { LogEntry } from "@repo/adapters";
+import type { PortCheckResult } from "../../lib/deployment-runtime";
 import { STEP_INDEX, STEP_PROGRESS, progressForStep } from "./build-steps";
 
 export interface ServiceStatusPayload {
@@ -181,6 +182,8 @@ export function updateStatus(
     errorDetails?: Record<string, unknown>;
     warningMessage?: string;
     errorMessage?: string;
+    /** Advisory post-deploy port-check results, forwarded on the `complete` event. */
+    portCheck?: PortCheckResult[];
   },
 ): void {
   const session = sessions.get(sessionId);
@@ -196,6 +199,7 @@ export function updateStatus(
       type: "complete",
       success: true,
       ...(session.warningMessage ? { warningMessage: session.warningMessage } : {}),
+      ...(meta?.portCheck && meta.portCheck.length > 0 ? { portCheck: meta.portCheck } : {}),
     });
     for (const writer of session.subscribers) {
       writer("complete", payload);

@@ -30,6 +30,8 @@ export interface ServerInfo {
   sshJumpHost: string | null;
   sshArgs: string | null;
   createdAt: string;
+  /** ISO-3166-1 alpha-2 country for the host IP, or null (hostname/private/unknown). */
+  country?: string | null;
 }
 
 /** True when running inside the Electron desktop shell */
@@ -58,6 +60,30 @@ export interface ServerCheckResult {
   components: ComponentStatus[];
   ready: boolean;
   missing: string[];
+}
+
+// ─── Edge (port 80/443) preflight ──────────────────────────────────────────────
+
+export type EdgeProxyKind = "nginx" | "caddy" | "apache" | "traefik" | "haproxy" | "openresty";
+export type EdgeClassification = "free" | "ours" | "known" | "unknown";
+
+export interface EdgeOccupant {
+  port: number;
+  pid?: number;
+  command?: string;
+  rawCommand?: string;
+  systemdUnit?: string;
+  systemdDescription?: string;
+  isDocker?: boolean;
+  containerName?: string;
+  proxy?: EdgeProxyKind;
+  managedByOpenship: boolean;
+}
+
+export interface EdgeStatus {
+  classification: EdgeClassification;
+  occupants: EdgeOccupant[];
+  canProceedClean: boolean;
 }
 
 export interface InstallResultResponse {
@@ -91,6 +117,16 @@ export interface SetupLogEvent {
   component: string;
   message: string;
   level: "info" | "warn" | "error";
+}
+
+/** Mid-install prompt the pipeline is blocked on (e.g. OpenResty edge takeover). */
+export interface SetupPromptEvent {
+  type: "prompt";
+  promptId: string;
+  title: string;
+  message: string;
+  actions: Array<{ id: string; label: string; variant?: string }>;
+  details?: Record<string, unknown>;
 }
 
 export interface ServerStats {
@@ -190,6 +226,13 @@ export const systemApi = {
       ...(components?.length ? { components } : {}),
     }, { timeout: 30_000 }), // headroom for a cold SSH connect + parallel probes
 
+  /** Answer a mid-install prompt (e.g. the OpenResty edge-takeover hold) */
+  respondInstall: (action: string, sessionId?: string) =>
+    api.post<{ ok: boolean }>(endpoints.system.installRespond, {
+      action,
+      ...(sessionId ? { sessionId } : {}),
+    }),
+
   /** Install a component on a specific server */
   installComponent: (serverId: string, component: string, config?: Record<string, unknown>) =>
     api.post<InstallResultResponse>(endpoints.system.install, {
@@ -221,6 +264,10 @@ export const systemApi = {
   /** Get a single server by ID */
   getServerById: (id: string) =>
     api.get<ServerInfo>(endpoints.system.server(id)),
+
+  /** Lightweight liveness probe for the list view (TCP reachability). */
+  probeReachability: (id: string) =>
+    api.get<{ reachable: boolean }>(endpoints.system.serverReachability(id)),
 
   /** Create a new server */
   createServerEntry: (data: Record<string, unknown>) =>

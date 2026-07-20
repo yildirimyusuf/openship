@@ -15,8 +15,20 @@ const localhost = (port: number) => `http://localhost:${port}`;
 export const LOCAL_WEB_URL = localhost(DEFAULT_PORT.web);
 export const LOCAL_DASHBOARD_URL = localhost(DEFAULT_PORT.dashboard);
 export const LOCAL_API_URL = localhost(DEFAULT_PORT.api);
-export const CLOUD_DASHBOARD_URL = "https://app.openship.io";
-export const CLOUD_API_URL = "https://api.openship.io";
+
+// The production cloud endpoints — env-overridable so a dev instance can point
+// "cloud" at a LOCAL SaaS without editing code or flipping the whole target row.
+// Unset (production / the default) → the real remote cloud, so self-hosted
+// production is unaffected. Set OPENSHIP_CLOUD_API_URL / OPENSHIP_CLOUD_DASHBOARD_URL
+// (e.g. http://localhost:4100 / http://localhost:3002) to exercise cloud flows
+// against a local `dev:saas` instance. Only consulted for the `cloud-saas` row.
+const envUrl = (key: string): string | undefined => {
+  const v = typeof process !== "undefined" ? process.env?.[key] : undefined;
+  return v && v.trim() ? v.trim() : undefined;
+};
+export const CLOUD_DASHBOARD_URL =
+  envUrl("OPENSHIP_CLOUD_DASHBOARD_URL") ?? "https://app.openship.io";
+export const CLOUD_API_URL = envUrl("OPENSHIP_CLOUD_API_URL") ?? "https://api.openship.io";
 
 /**
  * THE runtime-target table. Keyed by id — the id IS the key, no

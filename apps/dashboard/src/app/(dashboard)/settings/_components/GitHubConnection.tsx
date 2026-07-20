@@ -255,7 +255,7 @@ export function GitHubConnection() {
                     t.settings.github.disconnectAppBody,
                   )
                 }
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 bg-red-500/5 hover:bg-red-500/10 rounded-lg border border-red-500/15 hover:border-red-500/25 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-danger bg-danger-bg hover:bg-danger-bg rounded-lg border border-danger-border transition-colors"
               >
                 <Unplug className="size-3.5" />
                 {t.settings.github.disconnect}
@@ -358,7 +358,7 @@ function GhCliCard(props: {
         {/* Capability + status badges */}
         <div className="flex items-center gap-2 flex-wrap">
           <span
-            className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-warning-bg text-warning"
             title={t.settings.github.ghCli.localOnlyTitle}
           >
             <AlertTriangle className="size-2.5" />
@@ -389,7 +389,7 @@ function GhCliCard(props: {
         {/* Active-source warning — remote deploys get refused.
             Fires when CLI is the ONLY source (no cloud connection).  */}
         {active && (
-          <p className="text-sm text-amber-600 dark:text-amber-400 leading-relaxed">
+          <p className="text-sm text-warning leading-relaxed">
             <span className="font-medium">{t.settings.github.ghCli.activeWarnStrong}</span>{" "}
             {t.settings.github.ghCli.activeWarnRest}
           </p>

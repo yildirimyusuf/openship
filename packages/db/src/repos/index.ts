@@ -36,6 +36,8 @@ export {
   type NewBuildSession,
 } from "./deployment.repo";
 export { createDomainRepo, type Domain, type NewDomain } from "./domain.repo";
+export { createRouteRuleRepo, type RouteRule, type NewRouteRule } from "./route-rule.repo";
+export { createSystemNoticeRepo, type SystemNotice, type NewSystemNotice } from "./system-notice.repo";
 export {
   createCloudWebhookBindingRepo,
   type CloudWebhookBinding,
@@ -68,6 +70,16 @@ export {
   type NewInstanceSettings,
 } from "./instance-settings.repo";
 export { createServerRepo, type Server, type NewServer } from "./server.repo";
+export {
+  createServerGithubAuthRepo,
+  type ServerGithubAuth,
+  type NewServerGithubAuth,
+} from "./server-github-auth.repo";
+export {
+  createGithubDeployKeyRepo,
+  type GithubDeployKey,
+  type NewGithubDeployKey,
+} from "./github-deploy-key.repo";
 export {
   createServerTunnelRepo,
   type ServerTunnel,
@@ -117,9 +129,17 @@ export {
   type BackupRunStatus,
   type BackupRestoreStatus,
 } from "./backup.repo";
+export {
+  createDockerMigrationRunRepo,
+  type DockerMigrationRun,
+  type NewDockerMigrationRun,
+  type DockerMigrationStatus,
+} from "./docker-migration.repo";
 export { createMemberRepo, type Member, type MemberRole } from "./member.repo";
 export { createInvitationRepo, type Invitation } from "./invitation.repo";
 export { createAuditEventRepo, type AuditEvent, type NewAuditEvent } from "./audit-event.repo";
+export { createJobRunRepo, type JobRun, type NewJobRun } from "./job-run.repo";
+export { createJobRepo, type Job, type NewJob } from "./job.repo";
 export {
   createOrphanedResourceRepo,
   type OrphanedResource,
@@ -171,6 +191,8 @@ import { createProjectAppRepo } from "./project-app.repo";
 import { createProjectRepo } from "./project.repo";
 import { createDeploymentRepo } from "./deployment.repo";
 import { createDomainRepo } from "./domain.repo";
+import { createRouteRuleRepo } from "./route-rule.repo";
+import { createSystemNoticeRepo } from "./system-notice.repo";
 import { createCloudWebhookBindingRepo } from "./cloud-webhook-binding.repo";
 import { createGithubWebhookEventRepo } from "./github-webhook-event.repo";
 import { createServiceRepo } from "./service.repo";
@@ -178,6 +200,8 @@ import { createServiceDeploymentRepo } from "./service-deployment.repo";
 import { createSettingsRepo } from "./settings.repo";
 import { createInstanceSettingsRepo } from "./instance-settings.repo";
 import { createServerRepo } from "./server.repo";
+import { createServerGithubAuthRepo } from "./server-github-auth.repo";
+import { createGithubDeployKeyRepo } from "./github-deploy-key.repo";
 import { createServerTunnelRepo } from "./server-tunnel.repo";
 import { createMailServerRepo } from "./mail-server.repo";
 import { createAnalyticsRepo } from "./analytics.repo";
@@ -193,9 +217,12 @@ import {
   createBackupRunRepo,
   createBackupRestoreRepo,
 } from "./backup.repo";
+import { createDockerMigrationRunRepo } from "./docker-migration.repo";
 import { createMemberRepo } from "./member.repo";
 import { createInvitationRepo } from "./invitation.repo";
 import { createAuditEventRepo } from "./audit-event.repo";
+import { createJobRunRepo } from "./job-run.repo";
+import { createJobRepo } from "./job.repo";
 import { createOrphanedResourceRepo } from "./orphaned-resource.repo";
 import { createResourceGrantRepo } from "./resource-grant.repo";
 import { createInvitationPendingGrantRepo } from "./invitation-pending-grant.repo";
@@ -228,6 +255,8 @@ export const repos = {
   project: createProjectRepo(db),
   deployment: createDeploymentRepo(db),
   domain: createDomainRepo(db),
+  routeRule: createRouteRuleRepo(db),
+  notice: createSystemNoticeRepo(db),
   cloudWebhookBinding: createCloudWebhookBindingRepo(db),
   githubWebhookEvent: createGithubWebhookEventRepo(db),
   service: createServiceRepo(db),
@@ -235,6 +264,8 @@ export const repos = {
   settings: createSettingsRepo(db),
   instanceSettings: createInstanceSettingsRepo(db),
   server: createServerRepo(db),
+  serverGithubAuth: createServerGithubAuthRepo(db),
+  githubDeployKey: createGithubDeployKeyRepo(db),
   serverTunnel: createServerTunnelRepo(db),
   mailServer: createMailServerRepo(db),
   analytics: createAnalyticsRepo(db),
@@ -248,9 +279,12 @@ export const repos = {
   backupPolicy: createBackupPolicyRepo(db),
   backupRun: createBackupRunRepo(db),
   backupRestore: createBackupRestoreRepo(db),
+  dockerMigrationRun: createDockerMigrationRunRepo(db),
   member: createMemberRepo(db),
   invitation: createInvitationRepo(db),
   auditEvent: createAuditEventRepo(db),
+  jobRun: createJobRunRepo(db),
+  job: createJobRepo(db),
   orphanedResource: createOrphanedResourceRepo(db),
   resourceGrant: createResourceGrantRepo(db),
   invitationPendingGrant: createInvitationPendingGrantRepo(db),

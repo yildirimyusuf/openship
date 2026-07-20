@@ -13,6 +13,7 @@ import {
   createDestination,
   deleteDestination,
   getDestination,
+  getDestinationUsage,
   listDestinations,
   preflightDestination,
   updateDestination,
@@ -32,6 +33,17 @@ export async function getOne(c: Context) {
   await permission.assert(getRequestContext(c), { resourceType: "backup_destination", resourceId: id, action: "read" });
   try {
     return c.json({ data: await getDestination(ctx, id) });
+  } catch (err) {
+    return c.json({ error: safeErrorMessage(err) }, 404);
+  }
+}
+
+export async function getUsage(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(ctx, { resourceType: "backup_destination", resourceId: id, action: "read" });
+  try {
+    return c.json({ data: await getDestinationUsage(ctx, id) });
   } catch (err) {
     return c.json({ error: safeErrorMessage(err) }, 404);
   }

@@ -16,10 +16,12 @@ import { internalAuth, localOnly, requireRole } from "../../middleware";
 import { secureRouter } from "../../lib/secure-router";
 import * as fs from "./filesystem.controller";
 import * as setup from "./setup.controller";
+import * as selfApp from "./self-app.controller";
 import * as serverCheck from "./server-check.controller";
 import * as serversCtrl from "./servers.controller";
 import * as rateLimit from "./rate-limit.controller";
 import * as tunnels from "./tunnels.controller";
+import * as serverGithub from "../github/server-github.controller";
 import * as migration from "./migration/migration.controller";
 import * as dataTransfer from "./data-transfer/data-transfer.controller";
 
@@ -33,10 +35,22 @@ r.use("*", localOnly);
 /* ── Onboarding (first-run only, no auth) ───────────────────────── */
 r.public("get", "/onboarding", { reason: "First-run onboarding status check - no user exists yet" }, setup.onboardingStatus);
 r.public("post", "/onboarding", { reason: "First-run onboarding setup - creates initial admin user" }, setup.onboardingSetup);
+r.public("post", "/onboarding/test-connection", { reason: "First-run SSH reachability test - no user exists yet; gated to no-servers instance" }, serverCheck.onboardingTestConnection);
 
 /* ── Internal routes (Electron → API with shared token) ─────────── */
 r.public("post", "/setup", { reason: "Electron desktop client setup - protected by internalAuth shared token" }, internalAuth, setup.setup);
 r.public("get", "/setup", { reason: "Electron desktop client setup read - protected by internalAuth shared token" }, internalAuth, setup.getSetup);
+r.public("post", "/bootstrap-admin", { reason: "CLI first-admin creation — internal-token gated, one-shot before any admin exists (openship setup)" }, internalAuth, setup.bootstrapAdmin);
+
+/* ── Control-plane self-registration (CLI setup wizard) ─────────────
+ * After bootstrap-admin, the wizard registers Openship itself as an app
+ * (shows under Apps) + attaches its domain — free (Oblien edge) or custom
+ * (OpenResty + Let's Encrypt, streamed). All internal-token gated. */
+r.public("get", "/cloud-status", { reason: "CLI setup — read Openship Cloud connection state; internal-token gated" }, internalAuth, selfApp.cloudStatus);
+r.public("post", "/cloud-connect", { reason: "CLI setup — finalize Openship Cloud PKCE handshake for a free domain; internal-token gated" }, internalAuth, selfApp.cloudConnect);
+r.public("post", "/self-register", { reason: "CLI setup — register the control plane as an app + attach its domain; internal-token gated" }, internalAuth, selfApp.selfRegister);
+r.public("get", "/self-register/stream", { reason: "CLI setup — SSE progress for custom-domain edge provisioning; internal-token gated" }, internalAuth, selfApp.selfRegisterStream);
+r.public("post", "/self-edge/preflight", { reason: "CLI setup — detect what owns ports 80/443 before installing OpenResty; internal-token gated" }, internalAuth, selfApp.selfEdgePreflight);
 
 /* ── Authenticated routes (dashboard settings page) ─────────────── */
 r.get("/settings", { tag: "settings:read" }, setup.getSetup);
@@ -57,6 +71,7 @@ r.public(
 /* ── Servers CRUD ───────────────────────────────────────────────── */
 r.get("/servers", { tag: "server:list" }, serversCtrl.listServers);
 r.get("/servers/:id", { tag: "server:read" }, serversCtrl.getServer);
+r.get("/servers/:id/reachability", { tag: "server:read" }, serversCtrl.probeReachability);
 // Create has no :id in the URL — org scope comes from the request and the
 // row is created in the active org. collection:true keeps the permission
 // middleware from demanding a (nonexistent) :id param.
@@ -67,6 +82,17 @@ r.delete("/servers/:id", { tag: "server:admin" }, serversCtrl.deleteServer);
 /* ── Per-server rate limiting (OpenResty level) ─────────────────── */
 r.get("/servers/:id/rate-limit", { tag: "server:read" }, rateLimit.getRateLimit);
 r.patch("/servers/:id/rate-limit", { tag: "server:write" }, rateLimit.updateRateLimit);
+
+// ── Per-server GitHub auth (self-hosted): device-login token / PAT / SSH
+//    server-key / per-repo deploy-key. The `:id` server is the permission
+//    resource; handlers hard-guard cloud + org-scope the server. ──
+r.get("/servers/:id/github", { tag: "server:read" }, serverGithub.getStatus);
+r.post("/servers/:id/github/connect", { tag: "server:write" }, serverGithub.startConnect);
+r.get("/servers/:id/github/connect/poll", { tag: "server:read" }, serverGithub.pollConnect);
+r.put("/servers/:id/github/token", { tag: "server:write" }, serverGithub.putToken);
+r.post("/servers/:id/github/ssh-key", { tag: "server:write" }, serverGithub.generateSshKey);
+r.put("/servers/:id/github/deploy-key-mode", { tag: "server:write" }, serverGithub.useDeployKeyMode);
+r.delete("/servers/:id/github", { tag: "server:write" }, serverGithub.disconnect);
 
 /* ── Port-forward tunnels (DESKTOP-only; handlers add assertDesktop) ─
  * VS Code-style forwarding of a remote server port to localhost. Config
@@ -94,6 +120,7 @@ r.post("/check", { tag: "server:write", collection: true }, serverCheck.checkSer
 r.post("/install", { tag: "server:admin", collection: true }, serverCheck.installComponent);
 r.post("/remove", { tag: "server:admin", collection: true }, serverCheck.removeComponent);
 r.post("/install/stream", { tag: "server:admin", collection: true }, serverCheck.installStream);
+r.post("/install/respond", { tag: "server:admin", collection: true }, serverCheck.installRespond);
 r.get("/install/stream", { tag: "server:read", collection: true }, serverCheck.attachInstallStream);
 r.get("/install/session", { tag: "server:read", collection: true }, serverCheck.getInstallSession);
 

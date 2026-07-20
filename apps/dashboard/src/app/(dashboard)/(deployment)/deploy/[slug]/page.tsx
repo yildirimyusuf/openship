@@ -82,11 +82,16 @@ const DeployRepository: React.FC = () => {
         // Config-edit hydrates from saved data — surface that, not "Fetching from GitHub".
         if (isConfigEdit) {
             const label =
-                d.kind === "local" ? d.path : d.kind === "upload" ? t.deploy.page.uploadedFolder : `${d.owner}/${d.repo}`;
+                d.kind === "local" ? d.path
+                    : d.kind === "upload" ? t.deploy.page.uploadedFolder
+                    : d.kind === "project" ? ""
+                    : `${d.owner}/${d.repo}`;
             return { kind: "settings" as const, label };
         }
         if (d.kind === "local") return { kind: "local" as const, path: d.path };
         if (d.kind === "upload") return { kind: "local" as const, path: t.deploy.page.uploadedFolder };
+        // Repo-less app: hydrated from saved rows, no git fetch — neutral summary.
+        if (d.kind === "project") return { kind: "settings" as const, label: "" };
         return {
             kind: "repo" as const,
             owner: d.owner,
@@ -178,6 +183,11 @@ const DeployRepository: React.FC = () => {
                 result = await initializeFromProject(projectId, {
                     branch: branch ?? (decoded.kind === "repo" ? decoded.branch : undefined),
                 });
+            } else if (decoded.kind === "project") {
+                // Repo-less project (one-click app / saved services project): hydrate
+                // straight from its DB rows — services, env, exposed ports — in DEPLOY
+                // mode (no ?mode=config), so the sidebar stays "Deploy", not "Save".
+                result = await initializeFromProject(decoded.projectId, { branch });
             } else if (decoded.kind === "local") {
                 result = await initializeFromLocal(decoded.path, { projectId });
             } else if (decoded.kind === "upload") {

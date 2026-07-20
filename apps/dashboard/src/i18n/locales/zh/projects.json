@@ -185,7 +185,8 @@
     "topPaths": "热门路径",
     "requestCount": "{count} 次请求",
     "statusActive": "已启用",
-    "statusOff": "已关闭"
+    "statusOff": "已关闭",
+    "server": "服务器"
   },
   "stats": {
     "serverRequests": "服务器请求",
@@ -266,6 +267,10 @@
     "newCommitTitle": "有新提交可用",
     "newCommitOn": "位于",
     "newCommitDeployedOn": "——你当前部署于",
+    "newVersionTitle": "有新版本可用",
+    "newVersionAvailable": "有更新的版本可用：",
+    "newVersionDeployed": "——你当前部署于",
+    "deployVersion": "部署新版本",
     "deploying": "部署中……",
     "redeployLatest": "重新部署最新版本",
     "deployLatestTitle": "部署最新变更",
